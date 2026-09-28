@@ -115,8 +115,10 @@ export async function restoreVersion(projectId: string, baseVersion: number, res
 export type ChatMessage = { id: string; role: "user" | "assistant" | "system"; content: string; metadata: Record<string, unknown>; createdAt: string };
 export async function listMessages(projectId: string): Promise<ChatMessage[]> {
   const result = await db().query(
-    `SELECT m.* FROM messages m JOIN conversations c ON c.id = m.conversation_id
-     WHERE c.project_id = $1 ORDER BY m.created_at, m.id LIMIT 200`, [projectId],
+    `SELECT * FROM (
+       SELECT m.* FROM messages m JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.project_id = $1 ORDER BY m.created_at DESC, m.id DESC LIMIT 200
+     ) recent ORDER BY created_at, id`, [projectId],
   );
   return result.rows.map((row) => ({ id: String(row.id), role: row.role, content: String(row.content), metadata: row.metadata ?? {}, createdAt: new Date(row.created_at).toISOString() }));
 }
@@ -138,15 +140,20 @@ export async function getPendingProposal(projectId: string): Promise<Proposal | 
   return result.rows[0] ? mapProposal(result.rows[0]) : null;
 }
 export async function createProposal(projectId: string, baseVersion: number, operations: Operation[]): Promise<Proposal> {
-  const project = await getProject(projectId);
-  if (!project) throw new DocumentError("資料が見つかりません。", 404);
-  if (project.version !== baseVersion) throw new DocumentError("別の変更が先に保存されました。画面を更新してください。", 409);
-  const proposedDeck = applyOperations(project.deck, operations);
-  const summary = summarizeOperations(operations);
-  const id = crypto.randomUUID();
-  await db().query("INSERT INTO proposals(id,project_id,base_version,operations,proposed_document,summary,status) VALUES($1,$2,$3,$4,$5,$6,'pending')",
-    [id, projectId, baseVersion, JSON.stringify(operations), JSON.stringify(proposedDeck), summary]);
-  return { id, baseVersion, summary, operations, proposedDeck, status: "pending" };
+  return transaction(async (client) => {
+    const result = await client.query("SELECT * FROM projects WHERE id=$1 AND workspace_id=$2 FOR UPDATE", [projectId, LOCAL_WORKSPACE_ID]);
+    if (!result.rows[0]) throw new DocumentError("資料が見つかりません。", 404);
+    const project = mapProject(result.rows[0]);
+    if (project.version !== baseVersion) throw new DocumentError("別の変更が先に保存されました。画面を更新してください。", 409);
+    const pending = await client.query("SELECT id FROM proposals WHERE project_id=$1 AND status='pending' LIMIT 1", [projectId]);
+    if (pending.rows[0]) throw new DocumentError("確認待ちの変更案を先に適用または破棄してください。", 409);
+    const proposedDeck = applyOperations(project.deck, operations);
+    const summary = summarizeOperations(operations);
+    const id = crypto.randomUUID();
+    await client.query("INSERT INTO proposals(id,project_id,base_version,operations,proposed_document,summary,status) VALUES($1,$2,$3,$4,$5,$6,'pending')",
+      [id, projectId, baseVersion, JSON.stringify(operations), JSON.stringify(proposedDeck), summary]);
+    return { id, baseVersion, summary, operations, proposedDeck, status: "pending" };
+  });
 }
 export async function decideProposal(projectId: string, proposalId: string, accept: boolean): Promise<ProjectRecord | null> {
   await transaction(async (client) => {

@@ -54,11 +54,13 @@ export function Editor({ projectId }: { projectId: string }) {
   const chatEnd = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragSlide = useRef<string | null>(null);
+  const commitInFlight = useRef(false);
 
   const load = useCallback(async (initial = false) => {
     const data = await jsonRequest<ProjectPayload>(`/api/projects/${projectId}`);
     setProject(data.project); setHistory(data.history); setMessages(data.messages); setProposal(data.proposal);
     setSelectedSlideId((old) => old && data.project.deck.slides.some((s) => s.id === old) ? old : data.project.deck.slides[0]?.id ?? null);
+    setSelectedElementId((old) => old && data.project.deck.slides.some((s) => s.elements.some((e) => e.id === old)) ? old : null);
     if (initial) setLoading(false);
     return data;
   }, [projectId]);
@@ -80,7 +82,8 @@ export function Editor({ projectId }: { projectId: string }) {
   const changedIds = useMemo(() => new Set(proposal?.operations.flatMap((op) => "elementId" in op ? [op.elementId] : []) ?? []), [proposal]);
 
   async function commit(operations: Operation[]) {
-    if (!project || busy || proposal) return;
+    if (!project || busy || proposal || commitInFlight.current) return;
+    commitInFlight.current = true;
     const previousVersion = project.version;
     setSaveState("saving"); setError("");
     try {
@@ -90,18 +93,19 @@ export function Editor({ projectId }: { projectId: string }) {
       const refreshed = await load();
       return refreshed.project;
     } catch (reason) { setSaveState("error"); setError(reason instanceof Error ? reason.message : "保存に失敗しました。"); }
+    finally { commitInFlight.current = false; }
   }
 
   async function sendChat(event?: FormEvent) {
     event?.preventDefault();
-    if (!project || !prompt.trim() || !modelId || busy || proposal) return;
+    if (!project || !prompt.trim() || !modelId || busy || proposal || commitInFlight.current) return;
     const message = prompt.trim();
     const previousVersion = project.version;
     setBusy(true); setError(""); setNotice(""); setPrompt("");
     try {
       const result = await post<{ mode: "applied" | "proposal"; project?: ProjectRecord; proposal?: Proposal; compacted?: boolean }>(`/api/projects/${projectId}/chat`, {
         baseVersion: previousVersion, prompt: message, modelId,
-        target: currentSlide ? { slideId: currentSlide.id, elementId: selectedElementId || undefined } : undefined,
+        target: currentSlide ? { slideId: currentSlide.id, elementId: selectedElement?.id } : undefined,
       });
       if (result.mode === "applied") {
         setUndoTargets((items) => [...items, previousVersion]); setRedoTargets([]);
@@ -129,7 +133,7 @@ export function Editor({ projectId }: { projectId: string }) {
   }
 
   async function restore(targetVersion: number, kind: "undo" | "redo" | "history") {
-    if (!project || busy || proposal) return;
+    if (!project || busy || proposal || commitInFlight.current) return;
     const currentVersion = project.version;
     setBusy(true); setError("");
     try {
@@ -170,6 +174,7 @@ export function Editor({ projectId }: { projectId: string }) {
 
   async function upload(file: File) {
     if (!project || !currentSlide) { setError("先にスライドを作成してください。"); return; }
+    if (busy || proposal || commitInFlight.current) return;
     setSaveState("saving"); setError("");
     try {
       const form = new FormData(); form.set("file", file);
@@ -214,22 +219,22 @@ export function Editor({ projectId }: { projectId: string }) {
       </div>
       <div className="header-center">
         <span className={`save-indicator ${saveState === "error" ? "has-error" : ""}`}>{saveState === "saving" ? <Loader2 size={14} className="spin"/> : saveState === "error" ? <CircleAlert size={14}/> : <CircleCheck size={14}/>} {saveState === "saving" ? "保存中" : saveState === "error" ? "保存失敗" : "保存済み"}</span>
-        <button className="icon-button" title="元に戻す (Ctrl+Z)" disabled={!undoTargets.length || busy || !!proposal} onClick={() => void restore(undoTargets.at(-1)!, "undo")}><RotateCcw size={17}/></button>
-        <button className="icon-button" title="やり直す (Ctrl+Y)" disabled={!redoTargets.length || busy || !!proposal} onClick={() => void restore(redoTargets.at(-1)!, "redo")}><RotateCw size={17}/></button>
+        <button className="icon-button" title="元に戻す (Ctrl+Z)" disabled={!undoTargets.length || busy || !!proposal || saveState === "saving"} onClick={() => void restore(undoTargets.at(-1)!, "undo")}><RotateCcw size={17}/></button>
+        <button className="icon-button" title="やり直す (Ctrl+Y)" disabled={!redoTargets.length || busy || !!proposal || saveState === "saving"} onClick={() => void restore(redoTargets.at(-1)!, "redo")}><RotateCw size={17}/></button>
         <button className="icon-button" title="版の履歴" onClick={() => setShowHistory(true)}><History size={18}/></button>
       </div>
       <div className="header-right">
         <button className="icon-button responsive-toggle" title="スライド一覧" onClick={() => setSidebarOpen(!sidebarOpen)}><Layers3 size={18}/></button>
         <button className="icon-button responsive-toggle" title="AI チャット" onClick={() => setChatOpen(!chatOpen)}><MessageSquare size={18}/></button>
-        <button className="button button-primary export-button" onClick={download} disabled={exporting || !project.deck.slides.length}>{exporting ? <Loader2 className="spin" size={17}/> : <Download size={17}/>} <span>{exporting ? "出力中" : "PPTX 出力"}</span></button>
+        <button className="button button-primary export-button" onClick={download} disabled={exporting || saveState === "saving" || !project.deck.slides.length}>{exporting ? <Loader2 className="spin" size={17}/> : <Download size={17}/>} <span>{exporting ? "出力中" : "PPTX 出力"}</span></button>
       </div>
     </header>
 
     <div className="editor-body">
       <aside className={`slide-sidebar ${sidebarOpen ? "mobile-open" : ""}`}>
-        <div className="panel-heading"><span>スライド</span><button className="icon-button compact" title="スライドを追加" disabled={!!proposal || busy} onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] } }])}><Plus size={17}/></button></div>
+        <div className="panel-heading"><span>スライド</span><button className="icon-button compact" title="スライドを追加" disabled={!!proposal || busy || saveState === "saving"} onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] } }])}><Plus size={17}/></button></div>
         <div className="slide-list">
-          {displayDeck?.slides.map((slide, index) => <button key={slide.id} draggable={!proposal} onDragStart={() => { dragSlide.current = slide.id; }} onDragOver={(event) => event.preventDefault()}
+          {displayDeck?.slides.map((slide, index) => <button key={slide.id} draggable={!proposal && !busy && saveState !== "saving"} onDragStart={() => { dragSlide.current = slide.id; }} onDragOver={(event) => event.preventDefault()}
             onDrop={() => { const source = dragSlide.current; dragSlide.current = null; if (source && source !== slide.id && !proposal) void commit([{ type: "reorderSlide", slideId: source, toIndex: index }]); }}
             className={`slide-thumb ${selectedSlide?.id === slide.id ? "active" : ""}`} onClick={() => { setSelectedSlideId(slide.id); setSelectedElementId(null); setSidebarOpen(false); }}>
             <span className="thumb-number">{String(index + 1).padStart(2, "0")}</span>
@@ -239,7 +244,7 @@ export function Editor({ projectId }: { projectId: string }) {
           {!displayDeck?.slides.length && <div className="slide-list-empty">チャットから最初のスライドを作成しましょう。</div>}
         </div>
         <div className="sidebar-bottom"><button className="text-button" onClick={() => setShowTheme(!showTheme)}>テーマ <ChevronDown size={14}/></button>{showTheme && <div className="theme-menu">
-          {[{ label: "クリーン", primary: "#3156D3", accent: "#65A9F0" }, { label: "フォレスト", primary: "#176B5B", accent: "#7CBF9F" }, { label: "チャコール", primary: "#29344B", accent: "#C28A52" }].map((theme) => <button key={theme.label} disabled={!!proposal} onClick={() => { void commit([{ type: "setTheme", primary: theme.primary, accent: theme.accent }]); setShowTheme(false); }}><i style={{ background: theme.primary }}/>{theme.label}</button>)}
+          {[{ label: "クリーン", primary: "#3156D3", accent: "#65A9F0" }, { label: "フォレスト", primary: "#176B5B", accent: "#7CBF9F" }, { label: "チャコール", primary: "#29344B", accent: "#C28A52" }].map((theme) => <button key={theme.label} disabled={!!proposal || busy || saveState === "saving"} onClick={() => { void commit([{ type: "setTheme", primary: theme.primary, accent: theme.accent }]); setShowTheme(false); }}><i style={{ background: theme.primary }}/>{theme.label}</button>)}
         </div>}</div>
       </aside>
 
@@ -248,16 +253,16 @@ export function Editor({ projectId }: { projectId: string }) {
           <div className="canvas-breadcrumb"><span>{selectedSlide ? `スライド ${selectedIndex + 1}` : "キャンバス"}</span>{selectedElement && <><span className="crumb-separator">/</span><strong>{selectedElement.kind === "text" ? selectedElement.role : selectedElement.kind}</strong></>}</div>
           <div className="canvas-actions">
             <input ref={fileInput} type="file" accept="image/png,image/jpeg" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.target.value = ""; }}/>
-            <button className="toolbar-button" disabled={!project.deck.slides.length || rendering} onClick={previewOutput}>{rendering ? <Loader2 className="spin" size={16}/> : <Eye size={16}/>}出力プレビュー</button>
-            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy} onClick={() => fileInput.current?.click()}><ImagePlus size={16}/>画像</button>
-            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy} onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] }, index: (project.deck.slides.findIndex((s) => s.id === currentSlide?.id) + 1) }])}><FilePlus2 size={16}/>追加</button>
-            <button className="toolbar-button danger" disabled={!currentSlide || !!proposal || busy} onClick={() => { if (currentSlide && window.confirm("このスライドを削除しますか？")) void commit([{ type: "deleteSlide", slideId: currentSlide.id }]); }}><Trash2 size={16}/>削除</button>
+            <button className="toolbar-button" disabled={!project.deck.slides.length || rendering || saveState === "saving"} onClick={previewOutput}>{rendering ? <Loader2 className="spin" size={16}/> : <Eye size={16}/>}出力プレビュー</button>
+            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} onClick={() => fileInput.current?.click()}><ImagePlus size={16}/>画像</button>
+            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] }, index: (project.deck.slides.findIndex((s) => s.id === currentSlide?.id) + 1) }])}><FilePlus2 size={16}/>追加</button>
+            <button className="toolbar-button danger" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} onClick={() => { if (currentSlide && window.confirm("このスライドを削除しますか？")) void commit([{ type: "deleteSlide", slideId: currentSlide.id }]); }}><Trash2 size={16}/>削除</button>
           </div>
         </div>
         {proposal && <div className="proposal-bar"><div><Sparkles size={17}/><strong>AI の変更案</strong><span>{proposal.summary}</span></div><div className="segmented"><button className={!previewProposal ? "active" : ""} onClick={() => setPreviewProposal(false)}>現在</button><button className={previewProposal ? "active" : ""} onClick={() => setPreviewProposal(true)}>変更後</button></div></div>}
         <div className="canvas-stage">
           {selectedSlide ? <div className="canvas-frame"><SlideCanvas slide={selectedSlide} selectedId={proposal ? null : selectedElementId} changedIds={proposal && previewProposal ? changedIds : undefined}
-            readOnly={!!proposal || busy} onSelect={(id) => setSelectedElementId(id)} onCommit={(op) => void commit([op])}/></div> :
+            readOnly={!!proposal || busy || saveState === "saving"} onSelect={(id) => setSelectedElementId(id)} onCommit={(op) => void commit([op])}/></div> :
             <div className="blank-stage"><span className="blank-illustration"><Layers3 size={40}/></span><h2>ここから始めましょう</h2><p>右のチャットに作りたい資料を伝えると、スライドの構成案が表示されます。</p><span className="blank-hint">例：新サービスの提案資料を5枚で作成して</span></div>}
           {!!selectedSlide && <div className="canvas-help">要素を選択して移動 · 角をドラッグしてサイズ変更 · ダブルクリックで文字編集</div>}
         </div>
@@ -279,7 +284,7 @@ export function Editor({ projectId }: { projectId: string }) {
         <form className="chat-composer" onSubmit={sendChat}>
           {currentSlide && <div className="target-chip"><span>対象</span><strong>{targetLabel}</strong>{selectedElementId && <button type="button" title="要素選択を解除" onClick={() => setSelectedElementId(null)}><X size={13}/></button>}</div>}
           <div className="composer-box"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={project.deck.slides.length ? "このスライドをどう編集しますか？" : "作りたい資料を入力してください…"} rows={3}
-            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }}/><div className="composer-footer"><span>Enter で送信 · Shift+Enter で改行</span><button className="send-button" type="submit" title="送信" disabled={!modelId || !prompt.trim() || busy || !!proposal}><Send size={17}/></button></div></div>
+            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }}/><div className="composer-footer"><span>Enter で送信 · Shift+Enter で改行</span><button className="send-button" type="submit" title="送信" disabled={!modelId || !prompt.trim() || busy || !!proposal || saveState === "saving"}><Send size={17}/></button></div></div>
           {!models.length && <div className="model-notice">AI が未登録です。AI 設定からモデルを追加してください。</div>}
           {proposal && <div className="model-notice">変更案を適用または破棄してから、次の指示を送れます。</div>}
         </form>

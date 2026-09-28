@@ -92,13 +92,13 @@ async function reflect(memory: MemoryState, profile: ModelProfile, summarize: Su
   return { ...memory, reflection: text, observations: [] };
 }
 
-export async function prepareConversationContext(projectId: string, profile: ModelProfile, fixedPrompt: string, summarize: Summarizer): Promise<{ text: string; compacted: boolean; estimatedTokens: number }> {
+export async function prepareConversationContext(projectId: string, profile: ModelProfile, fixedPrompt: string, summarize: Summarizer, pending?: ContextMessage): Promise<{ text: string; compacted: boolean; estimatedTokens: number }> {
   if (!profile.contextWindow) throw new DocumentError("モデルの最大コンテキスト長が未設定です。AI 設定で取得または入力してください。", 400);
   const { memory: stored, messages, conversationId } = await load(projectId);
   const threshold = compactionThreshold(profile.contextWindow);
   const estimate = (state: MemoryState, raw: ContextMessage[]) => estimateTokens(fixedPrompt) + estimateTokens(assembleContext(state, raw));
   let memory = stored;
-  let recent = sinceBoundary(memory, messages);
+  let recent = [...sinceBoundary(memory, messages), ...(pending ? [pending] : [])];
   let compacted = false;
   if (shouldCompact(estimate(memory, recent), profile.maxOutputTokens, profile.contextWindow)) {
     // Keep the latest exchange and the current request word-for-word. Older turns become dated observations.

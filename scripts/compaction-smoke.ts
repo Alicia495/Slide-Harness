@@ -73,9 +73,9 @@ try {
   const original = await getProject(projectId);
   assert.ok(original);
   const prompt = "これまでの決定を踏まえ、社内向け進捗資料を1枚で作成して。";
-  await addMessage(projectId, "user", prompt, { modelId });
   const result = await generateOperations(projectId, original.deck, prompt, modelId);
   assert.equal(result.compacted, true);
+  await addMessage(projectId, "user", prompt, { modelId });
   await addMessage(projectId, "assistant", result.reply, { mode: "proposal" });
   const memory = await db().query<{ observations: { text: string }[]; reflection: string; compaction_count: number; last_compacted_message_id: string }>(
     "SELECT observations,reflection,compaction_count,last_compacted_message_id FROM conversation_memory WHERE conversation_id=$1", [conversationId],

@@ -56,4 +56,11 @@ describe("conversation memory", () => {
     expect(text).toContain("目的: 社内提案");
     expect(text).toContain("タイトルは『次の一歩』");
   });
+
+  it("includes the current request without writing it to message history", async () => {
+    const pending = { id: "pending", role: "user" as const, content: "今回の依頼は一枚だけ", metadata: {}, createdAt: "2026-09-29T00:00:00Z" };
+    const result = await prepareConversationContext("project-1", profile, "現在の資料", async () => "", pending);
+    expect(result.text).toContain("今回の依頼は一枚だけ");
+    expect(state.saved).toHaveLength(0);
+  });
 });

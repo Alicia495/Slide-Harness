@@ -28,7 +28,7 @@ OpenAI 互換モデルへの生成リクエストは `temperature=1.0`、`top_p=
 
 ### vLLM
 
-vLLM などの OpenAI 互換 API を別途起動し、`VLLM_BASE_URL` を `/v1` まで含めて指定します。ローカル開発では `http://127.0.0.1:8888/v1`、Docker Desktop からホスト上のサーバーへ接続する場合は `http://host.docker.internal:8888/v1` のように指定します。`VLLM_MODEL` は `/v1/models` が返す文章生成モデルの ID です。認証不要なら `VLLM_API_KEY` は空欄にします。モデルに JSON 形式の応答と指示追従の能力が必要です。画面のモデル選択後、接続テストを実行できます。
+vLLM などの OpenAI 互換 API を別途起動し、`VLLM_BASE_URL` を `/v1` まで含めて指定します。ローカル開発では `http://127.0.0.1:8888/v1`、Docker Desktop からホスト上のサーバーへ接続する場合は `http://host.docker.internal:8888/v1` のように指定します。コンテナ内の `127.0.0.1` はホストではなくコンテナ自身です。`VLLM_MODEL` は `/v1/models` が返す文章生成モデルの ID です。認証不要なら `VLLM_API_KEY` は空欄にします。ホスト上のAIサーバーがコンテナからの接続に認証を要求する場合は、そのサーバーのAPIキーを設定してください。モデルに JSON 形式の応答と指示追従の能力が必要です。画面のモデル選択後、接続テストを実行できます。
 
 ## 使い方
 

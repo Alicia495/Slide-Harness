@@ -3,7 +3,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateText, type LanguageModel } from "ai";
 import { z } from "zod";
 import { type Deck, OperationSchema, slideTitle, type Operation } from "./document";
-import { applyOperations } from "./operations";
+import { applyOperations, DocumentError } from "./operations";
 import { getModel, type ModelConfig, type ModelProfile } from "./model-settings";
 import { prepareConversationContext } from "./context-memory";
 
@@ -106,14 +106,16 @@ function demoResult(deck: Deck, request: string, target?: { slideId?: string; el
 
 export async function generateOperations(projectId: string, deck: Deck, request: string, modelId: string, target?: { slideId?: string; elementId?: string }): Promise<AIResult & { compacted?: boolean }> {
   const profile = await getModel(modelId);
-  if (!profile) throw new Error("AI モデルを選択してください。");
+  if (!profile) throw new DocumentError("AI モデルを選択してください。");
   if (profile.provider === "demo") return demoResult(deck, request, target);
   const model = modelFor(profile);
   const fixedPrompt = `${SYSTEM}\nSelected target: ${JSON.stringify(target ?? {})}\nCurrent document: ${deckContext(deck)}`;
+  const pending = { id: crypto.randomUUID(), role: "user" as const, content: request,
+    metadata: { modelId, target }, createdAt: new Date().toISOString() };
   const context = await prepareConversationContext(projectId, profile, fixedPrompt, async (instruction, maxOutputTokens) => {
     const result = await generateText({ model, prompt: instruction, maxOutputTokens, ...samplingFor(profile), abortSignal: AbortSignal.timeout(120000) });
     return result.text;
-  });
+  }, pending);
   const prompt = `Selected target: ${JSON.stringify(target ?? {})}\nCurrent document (source of truth): ${deckContext(deck)}\n\n${context.text}\n\n${deck.slides.length ? "Edit the existing document. The latest user message is the request to answer." : "The document is empty. Create it with replaceDeck."}`;
   let issue = "";
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -137,7 +139,7 @@ export async function generateOperations(projectId: string, deck: Deck, request:
 
 export async function testModelConnection(modelId: string): Promise<string> {
   const profile = await getModel(modelId);
-  if (!profile) throw new Error("AI モデルが設定されていません。");
+  if (!profile) throw new DocumentError("AI モデルが設定されていません。");
   if (profile.provider === "demo") return "デモモードは利用できます。";
   const result = await generateText({
     model: modelFor(profile), prompt: "Reply with exactly OK.", maxOutputTokens: Math.min(256, profile.maxOutputTokens),

@@ -52,6 +52,8 @@ function ElementBox({ element, canvasWidth, slideId, selected, changed, compact,
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const interaction = useRef<{ mode: "move" | "resize"; startX: number; startY: number; initial: Box; moved: boolean } | null>(null);
+  const draftRef = useRef<Box | null>(null);
+  const editingRef = useRef(false);
   const box = draft ?? element;
   const fontPx = element.kind === "text" ? Math.max(compact ? 3 : 8, element.fontSize * canvasWidth / 960) : 12;
   const style: React.CSSProperties = {
@@ -77,25 +79,33 @@ function ElementBox({ element, canvasWidth, slideId, selected, changed, compact,
     const dy = (event.clientY - state.startY) / canvas.height * SLIDE_H;
     if (Math.abs(dx) + Math.abs(dy) < 0.015 && !state.moved) return;
     state.moved = true;
-    if (state.mode === "move") setDraft({ ...state.initial, x: round(clamp(state.initial.x + dx, 0, SLIDE_W - state.initial.w)), y: round(clamp(state.initial.y + dy, 0, SLIDE_H - state.initial.h)) });
-    else setDraft({ ...state.initial, w: round(clamp(state.initial.w + dx, 0.25, SLIDE_W - state.initial.x)), h: round(clamp(state.initial.h + dy, 0.2, SLIDE_H - state.initial.y)) });
+    const next = state.mode === "move"
+      ? { ...state.initial, x: round(clamp(state.initial.x + dx, 0, SLIDE_W - state.initial.w)), y: round(clamp(state.initial.y + dy, 0, SLIDE_H - state.initial.h)) }
+      : { ...state.initial, w: round(clamp(state.initial.w + dx, 0.25, SLIDE_W - state.initial.x)), h: round(clamp(state.initial.h + dy, 0.2, SLIDE_H - state.initial.y)) };
+    draftRef.current = next;
+    setDraft(next);
   }
   function up() {
     const state = interaction.current;
     interaction.current = null;
-    if (!state || !state.moved || !draft) { setDraft(null); return; }
-    if (state.mode === "move") onCommit?.({ type: "moveElement", slideId, elementId: element.id, x: draft.x, y: draft.y });
-    else onCommit?.({ type: "resizeElement", slideId, elementId: element.id, w: draft.w, h: draft.h });
+    const finalDraft = draftRef.current;
+    draftRef.current = null;
     setDraft(null);
+    if (!state || !state.moved || !finalDraft) return;
+    if (state.mode === "move") onCommit?.({ type: "moveElement", slideId, elementId: element.id, x: finalDraft.x, y: finalDraft.y });
+    else onCommit?.({ type: "resizeElement", slideId, elementId: element.id, w: finalDraft.w, h: finalDraft.h });
   }
+  function cancel() { interaction.current = null; draftRef.current = null; setDraft(null); }
   function finishText(save: boolean) {
+    if (!editingRef.current) return;
+    editingRef.current = false;
     if (save && element.kind === "text" && editText !== element.text) onCommit?.({ type: "updateText", slideId, elementId: element.id, text: editText });
     setEditing(false);
   }
   return <div className={`canvas-element ${selected && !compact ? "is-selected" : ""} ${changed ? "is-changed" : ""} ${!readOnly ? "is-editable" : ""}`}
-    style={style} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+    style={style} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel}
     onClick={(event) => { event.stopPropagation(); onSelect?.(element.id); }}
-    onDoubleClick={(event) => { if (element.kind === "text" && !readOnly) { event.stopPropagation(); setEditText(element.text); setEditing(true); onSelect?.(element.id); } }}>
+    onDoubleClick={(event) => { if (element.kind === "text" && !readOnly) { event.stopPropagation(); setEditText(element.text); editingRef.current = true; setEditing(true); onSelect?.(element.id); } }}>
     {element.kind === "text" && (editing ? <textarea autoFocus className="canvas-text-editor" style={{ fontSize: fontPx }} value={editText}
       onChange={(event) => setEditText(event.target.value)} onBlur={() => finishText(true)}
       onKeyDown={(event) => { if (event.key === "Escape") finishText(false); if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) finishText(true); }}/>

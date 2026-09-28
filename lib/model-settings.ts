@@ -121,6 +121,9 @@ async function environmentContext(input: DiscoveryInput): Promise<number | null>
   envCache.set(key, { value, until: Date.now() + 5 * 60_000 });
   return value;
 }
+function environmentMaxOutput(contextWindow: number | null): number {
+  return contextWindow ? Math.min(4096, Math.max(64, Math.floor(contextWindow * 0.2))) : 4096;
+}
 async function environmentModels(): Promise<ModelConfig[]> {
   const models: ModelConfig[] = [];
   if (process.env.VLLM_BASE_URL && process.env.VLLM_MODEL) {
@@ -130,7 +133,7 @@ async function environmentModels(): Promise<ModelConfig[]> {
     const contextWindow = Number(process.env.VLLM_CONTEXT_WINDOW) || await environmentContext({ provider: "vllm", baseUrl, modelName, resourceName: "", apiVersion: "", apiKey });
     models.push({ id: "env-vllm", label: `OpenAI 互換 · ${modelName}`, provider: "vllm", modelName, baseUrl, resourceName: "", apiVersion: "", legacyUrls: false,
       hasApiKey: !!apiKey, apiKey, contextWindow, contextSource: process.env.VLLM_CONTEXT_WINDOW ? "manual" : contextWindow ? "detected" : "unknown",
-      temperature: 1, topP: 0.95, maxOutputTokens: 4096, managedBy: "environment" });
+      temperature: 1, topP: 0.95, maxOutputTokens: environmentMaxOutput(contextWindow), managedBy: "environment" });
   }
   if (process.env.AZURE_OPENAI_DEPLOYMENT && process.env.AZURE_OPENAI_API_KEY && (process.env.AZURE_OPENAI_RESOURCE || process.env.AZURE_OPENAI_ENDPOINT)) {
     const modelName = process.env.AZURE_OPENAI_DEPLOYMENT;
@@ -141,7 +144,7 @@ async function environmentModels(): Promise<ModelConfig[]> {
     models.push({ id: "env-azure", label: `Azure OpenAI · ${modelName}`, provider: "azure", modelName, baseUrl, resourceName,
       apiVersion: process.env.AZURE_OPENAI_API_VERSION || "", legacyUrls: process.env.AZURE_OPENAI_LEGACY_URLS === "true",
       hasApiKey: true, apiKey, contextWindow, contextSource: process.env.AZURE_OPENAI_CONTEXT_WINDOW ? "manual" : contextWindow ? "detected" : "unknown",
-      temperature: 0.2, topP: 1, maxOutputTokens: 4096, managedBy: "environment" });
+      temperature: 0.2, topP: 1, maxOutputTokens: environmentMaxOutput(contextWindow), managedBy: "environment" });
   }
   if (process.env.DEMO_AI === "true") models.push({ id: "demo", label: "デモ（外部AIなし）", provider: "demo", modelName: "demo", baseUrl: "", resourceName: "", apiVersion: "", legacyUrls: false,
     hasApiKey: false, contextWindow: null, contextSource: "unknown", temperature: 0.2, topP: 1, maxOutputTokens: 4096, managedBy: "demo" });
@@ -158,6 +161,7 @@ export async function listModels(): Promise<ModelProfile[]> {
 
 export async function getModel(id: string): Promise<ModelConfig | null> {
   if (id === "demo" || id.startsWith("env-")) return (await environmentModels()).find((model) => model.id === id) ?? null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
   const rows = await db().query("SELECT * FROM ai_models WHERE id=$1 AND workspace_id=$2", [id, LOCAL_WORKSPACE_ID]);
   return rows.rows[0] ? fromRow(rows.rows[0], true) : null;
 }
