@@ -1,0 +1,41 @@
+{
+  "name": "slide-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "build": "next build",
+    "start": "next start --hostname 0.0.0.0",
+    "db:dev": "tsx scripts/dev-db.ts",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-sdk/azure": "4.0.82",
+    "@ai-sdk/openai-compatible": "3.0.57",
+    "ai": "7.0.118",
+    "lucide-react": "0.468.0",
+    "next": "16.3.6",
+    "pg": "8.23.0",
+    "pptxgenjs": "4.0.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "jszip": "^3.10.2",
+    "tsx": "4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.0"
+  },
+  "packageManager": "pnpm@11.19.0"
+}

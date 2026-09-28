@@ -1,0 +1,51 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: slide_harness
+      POSTGRES_USER: slide_harness
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-slide_harness_local}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slide_harness -d slide_harness"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${APP_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgres://slide_harness:${DB_PASSWORD:-slide_harness_local}@db:5432/slide_harness
+      DATA_DIR: /app/data
+      AI_SETTINGS_ENCRYPTION_KEY: ${AI_SETTINGS_ENCRYPTION_KEY:-}
+      AZURE_OPENAI_RESOURCE: ${AZURE_OPENAI_RESOURCE:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-}
+      AZURE_OPENAI_LEGACY_URLS: ${AZURE_OPENAI_LEGACY_URLS:-false}
+      AZURE_OPENAI_CONTEXT_WINDOW: ${AZURE_OPENAI_CONTEXT_WINDOW:-}
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-}
+      VLLM_MODEL: ${VLLM_MODEL:-}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+      VLLM_CONTEXT_WINDOW: ${VLLM_CONTEXT_WINDOW:-}
+      DEMO_AI: ${DEMO_AI:-false}
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  app_data:
