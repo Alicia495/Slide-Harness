@@ -41,8 +41,9 @@ function addElement(pptx: PptxGenJS, slide: PptxGenJS.Slide, element: Element, f
       const beginArrowType = (element.arrowHead === "start" || element.arrowHead === "both") ? "arrow" : undefined;
       slide.addShape(shapeType, {
         ...(isLine ? { x: element.x, y: element.y + element.h / 2, w: element.w, h: 0 } : box),
-        // PptxGenJS 4 の roundRect は rectRadius(0.0〜1.0)で角丸を指定する。
-        ...(element.shape === "roundRect" ? { rectRadius: element.radius ?? 0.08 } : {}),
+        // PptxGenJS の roundRect は rectRadius が角半径(min 辺に対する比率)に変換され、
+        // 描画半径が rectRadius/2 になるため、文書の radius(インチ)を 2 倍して指定する。
+        ...(element.shape === "roundRect" ? { rectRadius: (element.radius ?? 0.08) * 2 } : {}),
         rotate,
         fill: isLine ? undefined : { color: hex(element.fill) },
         line: {

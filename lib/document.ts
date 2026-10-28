@@ -220,7 +220,7 @@ export function slideFromBlueprint(input: SlideBlueprint, theme: Theme, index: n
       for (let i = 0; i < count; i++) {
         const item = items[i] || { stepNumber: i + 1, title: `ステップ ${i + 1}`, body: "" };
         const cardX = 0.95 + i * (cardW + arrowW + arrowGap * 2);
-        elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: cardX, y: bodyY, w: cardW, h: cardH, fill: "#F8FAFC", stroke: "#CBD5E1", radius: 0.08, rotation: 0 });
+        elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: cardX, y: bodyY, w: cardW, h: cardH, fill: "#F8FAFC", stroke: "#B4C7E7", radius: 0.08, rotation: 0 });
         elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "ellipse", x: cardX + (cardW - 0.65) / 2, y: bodyY + 0.35, w: 0.65, h: 0.65, fill: theme.primary, rotation: 0 });
         elements.push(textElement(String(item.stepNumber), cardX, bodyY + 0.45, cardW, 0.45, 17, theme, "title", { color: "#FFFFFF", align: "center", bold: true }));
         elements.push(textElement(item.title, cardX + 0.15, bodyY + 1.25, cardW - 0.3, 0.65, 16, theme, "title", { align: "center", bold: true }));
@@ -240,7 +240,7 @@ export function slideFromBlueprint(input: SlideBlueprint, theme: Theme, index: n
       for (let i = 0; i < count; i++) {
         const item = items[i] || { title: `項目 ${i + 1}`, body: "", icon: "Sparkles" };
         const cardX = 0.95 + i * (cardW + gap);
-        elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: cardX, y: bodyY, w: cardW, h: cardH, fill: "#FFFFFF", stroke: "#DDE3EA", radius: 0.08, rotation: 0 });
+        elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: cardX, y: bodyY, w: cardW, h: cardH, fill: "#FFFFFF", stroke: "#B4C7E7", radius: 0.08, rotation: 0 });
         if (item.icon) {
           elements.push({ kind: "icon", id: crypto.randomUUID(), name: item.icon, color: theme.primary, x: cardX + 0.3, y: bodyY + 0.35, w: 0.55, h: 0.55, rotation: 0 });
         }
@@ -261,7 +261,7 @@ export function slideFromBlueprint(input: SlideBlueprint, theme: Theme, index: n
       for (let i = 0; i < count; i++) {
         const item = items[i] || { value: "-", label: `指標 ${i + 1}` };
         const cardX = 0.95 + i * (cardW + gap);
-        elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: cardX, y: bodyY + 0.2, w: cardW, h: cardH, fill: "#F8FAFC", stroke: "#E2E8F0", radius: 0.08, rotation: 0 });
+        elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: cardX, y: bodyY + 0.2, w: cardW, h: cardH, fill: "#F8FAFC", stroke: "#B4C7E7", radius: 0.08, rotation: 0 });
         elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "rect", x: cardX + 0.3, y: bodyY + 0.2, w: cardW - 0.6, h: 0.06, fill: theme.primary, rotation: 0 });
         const valText = item.unit ? `${item.value} ${item.unit}` : item.value;
         elements.push(textElement(valText, cardX + 0.15, bodyY + 0.8, cardW - 0.3, 1.2, 36, theme, "title", { color: theme.primary, align: "center", bold: true, valign: "mid" }));
@@ -284,7 +284,7 @@ export function slideFromBlueprint(input: SlideBlueprint, theme: Theme, index: n
       };
       const cardW = 5.25;
       const cardH = 4.75;
-      elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: 0.95, y: bodyY, w: cardW, h: cardH, fill: "#F8FAFC", stroke: "#CBD5E1", radius: 0.08, rotation: 0 });
+      elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: 0.95, y: bodyY, w: cardW, h: cardH, fill: "#F8FAFC", stroke: "#B4C7E7", radius: 0.08, rotation: 0 });
       elements.push({ kind: "shape", id: crypto.randomUUID(), shape: "roundRect", x: 1.15, y: bodyY + 0.25, w: cardW - 0.4, h: 0.65, fill: "#E2E8F0", radius: 0.04, rotation: 0 });
       elements.push(textElement(comp.left.title, 1.3, bodyY + 0.32, cardW - 0.7, 0.5, 17, theme, "title", { color: "#334155", bold: true, align: "center" }));
       if (comp.left.tag) elements.push(textElement(comp.left.tag, 1.3, bodyY + 1.05, cardW - 0.7, 0.3, 10, theme, "caption", { color: theme.primary, bold: true, align: "center" }));

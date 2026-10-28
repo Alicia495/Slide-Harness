@@ -23,33 +23,33 @@ function ShapeSvg({ element }: { element: ShapeElement }) {
   const isLine = element.shape === "line";
   const fill = isLine ? "none" : element.fill;
   const stroke = element.stroke || (isLine ? element.fill : "none");
-  const strokeWidth = element.stroke ? (isLine ? 3 : 2) : (isLine ? 3 : 0);
+  const strokeWidth = element.stroke ? (isLine ? 3 : 1) : (isLine ? 3 : 0);
 
   switch (element.shape) {
     case "rect":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><rect x="0" y="0" width="100" height="100" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><rect x="0" y="0" width="100" height="100" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "roundRect":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><rect x="1" y="1" width="98" height="98" rx="8" ry="8" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><rect x="1" y="1" width="98" height="98" rx={clamp((element.radius ?? 0.08) / element.w * 100, 0, 50)} ry={clamp((element.radius ?? 0.08) / element.h * 100, 0, 50)} fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "ellipse":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><ellipse cx="50" cy="50" rx="49" ry="49" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><ellipse cx="50" cy="50" rx="49" ry="49" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "triangle":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,2 98,98 2,98" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,2 98,98 2,98" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "rightArrow":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="0,30 65,30 65,8 100,50 65,92 65,70 0,70" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="0,30 65,30 65,8 100,50 65,92 65,70 0,70" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "leftArrow":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="100,30 35,30 35,8 0,50 35,92 35,70 100,70" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="100,30 35,30 35,8 0,50 35,92 35,70 100,70" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "upArrow":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="30,100 30,35 8,35 50,0 92,35 70,35 70,100" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="30,100 30,35 8,35 50,0 92,35 70,35 70,100" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "downArrow":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="30,0 30,65 8,65 50,100 92,65 70,65 70,0" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="30,0 30,65 8,65 50,100 92,65 70,65 70,0" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "leftRightArrow":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="30,10 0,50 30,90 30,68 70,68 70,90 100,50 70,10 70,32 30,32" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="30,10 0,50 30,90 30,68 70,68 70,90 100,50 70,10 70,32 30,32" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "upDownArrow":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="10,30 50,0 90,30 68,30 68,70 90,70 50,100 10,70 32,70 32,30" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="10,30 50,0 90,30 68,30 68,70 90,70 50,100 10,70 32,70 32,30" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "chevron":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="0,0 75,0 100,50 75,100 0,100 25,50" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="0,0 75,0 100,50 75,100 0,100 25,50" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "callout":
-      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M 6,4 Q 2,4 2,8 L 2,66 Q 2,70 6,70 L 25,70 L 20,96 L 44,70 L 94,70 Q 98,70 98,66 L 98,8 Q 98,4 94,4 Z" fill={fill} stroke={stroke} strokeWidth={strokeWidth} /></svg>;
+      return <svg className="canvas-shape-svg" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M 6,4 Q 2,4 2,8 L 2,66 Q 2,70 6,70 L 25,70 L 20,96 L 44,70 L 94,70 Q 98,70 98,66 L 98,8 Q 98,4 94,4 Z" fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" /></svg>;
     case "line": {
       const hasEnd = element.arrowHead === "end" || element.arrowHead === "both";
       const hasStart = element.arrowHead === "start" || element.arrowHead === "both";
