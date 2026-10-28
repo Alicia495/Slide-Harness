@@ -774,11 +774,11 @@ describe("working copy operation budget", () => {
 });
 
 describe("tool loop feature flag", () => {
-  it("enables the tool loop only with the flag and an existing slide", () => {
+  it("enables the tool loop for every deck with the flag, including new empty decks", () => {
     const deck = sampleDeck();
     expect(isToolLoopEnabled({ AI_TOOL_LOOP_ENABLED: "true" }, deck)).toBe(true);
     expect(isToolLoopEnabled({ AI_TOOL_LOOP_ENABLED: "false" }, deck)).toBe(false);
     expect(isToolLoopEnabled({}, deck)).toBe(false);
-    expect(isToolLoopEnabled({ AI_TOOL_LOOP_ENABLED: "true" }, emptyDeck("空の資料"))).toBe(false);
+    expect(isToolLoopEnabled({ AI_TOOL_LOOP_ENABLED: "true" }, emptyDeck("空の資料"))).toBe(true);
   });
 });

@@ -235,14 +235,15 @@ describe("AI generation mode selection", () => {
     expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "true" }, deckWithSlide("表紙"))).toBe("tool-loop");
   });
 
-  it("selects legacy for an empty deck even with the flag enabled", () => {
-    expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "true" }, emptyDeck("空の資料"))).toBe("legacy");
+  it("selects tool-loop for an empty deck so new creation runs through tools", () => {
+    expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "true" }, emptyDeck("空の資料"))).toBe("tool-loop");
   });
 
   it("selects legacy when the flag is not exactly true", () => {
     const deck = deckWithSlide("表紙");
     expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "false" }, deck)).toBe("legacy");
     expect(selectAIGenerationMode({}, deck)).toBe("legacy");
+    expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "false" }, emptyDeck("空の資料"))).toBe("legacy");
   });
 });
 
