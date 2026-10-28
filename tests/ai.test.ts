@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, createToolLoopActivityFeed, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, toolLoopSampling, toolLoopTokenBudget, toolLoopWorkflowInstruction, tokenUsageExceedsBudget, validationFailureMessage, type ModelConfig, type ToolLoopActivityEvent } from "../lib/ai";
+import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_MAX_STEPS, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, createToolLoopActivityFeed, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, toolLoopMaxSteps, toolLoopSampling, toolLoopTokenBudget, toolLoopWorkflowInstruction, tokenUsageExceedsBudget, validationFailureMessage, type ModelConfig, type ToolLoopActivityEvent } from "../lib/ai";
 import { emptyDeck, type Deck } from "../lib/document";
 import { DocumentError, isSmallAIEdit } from "../lib/operations";
 
@@ -231,7 +231,15 @@ describe("Tool loop system prompt", () => {
   it("instructs an empty deck run to create the deck with write_deck", () => {
     const instruction = toolLoopWorkflowInstruction(emptyDeck("空の資料"));
     expect(instruction).toContain("write_deck");
+    expect(instruction).toContain("parallel");
+    expect(instruction).toContain("inspect_layout");
     expect(toolLoopWorkflowInstruction(deckWithSlide("表紙"))).not.toContain("write_deck");
+  });
+
+  it("gives new deck creation runs a wider step budget than edits", () => {
+    expect(toolLoopMaxSteps(deckWithSlide("表紙"))).toBe(TOOL_LOOP_MAX_STEPS);
+    expect(toolLoopMaxSteps(emptyDeck("空の資料"))).toBeGreaterThan(TOOL_LOOP_MAX_STEPS);
+    expect(toolLoopMaxSteps(emptyDeck("空の資料"))).toBeLessThanOrEqual(16);
   });
 
   it("does not reuse the JSON-in-prompt operations contract", () => {
