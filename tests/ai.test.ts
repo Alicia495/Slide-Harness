@@ -233,6 +233,7 @@ describe("Tool loop system prompt", () => {
     expect(instruction).toContain("write_deck");
     expect(instruction).toContain("parallel");
     expect(instruction).toContain("inspect_layout");
+    expect(instruction).toContain("at most once");
     expect(toolLoopWorkflowInstruction(deckWithSlide("表紙"))).not.toContain("write_deck");
   });
 
