@@ -10,19 +10,29 @@ import {
   type Operation,
   type SlideBlueprint,
 } from "../lib/document";
-import { applyOperations } from "../lib/operations";
+import { applyOperations, DocumentError } from "../lib/operations";
 import {
   classifyChanges,
+  createInspectionRuntime,
   createWorkingCopy,
   editElements,
   getDeckSummary,
   getSlide,
   inspectLayout,
+  inspectVisual,
+  renderSlide,
   reflowSlide,
   writeSlide,
   type ElementPatch,
+  type InspectionDeps,
+  type InspectionLimits,
+  type InspectionRuntime,
   type PolicyDecision,
   type ReflowRule,
+  type RenderFn,
+  type VisualInsight,
+  type VisionFn,
+  type WorkingCopy,
 } from "../lib/agent-harness";
 
 function sampleDeck(): Deck {
@@ -250,5 +260,175 @@ describe("commit policy", () => {
 
     const structural: Operation[] = [{ type: "deleteSlide", slideId }];
     expect(classifyChanges({ tool: "edit", operations: structural })).toBe<PolicyDecision>("proposal");
+  });
+});
+
+// --- Phase 3A: render / visual inspection runtime (Red: 未実装 API の契約固定) ---
+
+type RenderSpy = {
+  fn: RenderFn;
+  calls: number;
+  received: Deck[];
+};
+
+type VisionSpy = {
+  fn: VisionFn;
+  calls: number;
+  received: { image: Buffer; slideId: string; intent: string }[];
+};
+
+function makeRenderSpy(failWith?: Error): RenderSpy {
+  const spy: RenderSpy = { fn: () => Buffer.from(""), calls: 0, received: [] };
+  spy.fn = (deck: Deck): Buffer => {
+    spy.calls += 1;
+    spy.received.push(structuredClone(deck));
+    if (failWith) throw failWith;
+    return Buffer.from("rendered-image");
+  };
+  return spy;
+}
+
+function makeVisionSpy(failWith?: Error): VisionSpy {
+  const insight: VisualInsight = { summary: "要約", issues: ["指摘"], meetsIntent: true };
+  const spy: VisionSpy = {
+    fn: () => insight,
+    calls: 0,
+    received: [],
+  };
+  spy.fn = (request: { image: Buffer; slideId: string; intent: string }): VisualInsight => {
+    spy.calls += 1;
+    spy.received.push({ image: request.image, slideId: request.slideId, intent: request.intent });
+    if (failWith) throw failWith;
+    return insight;
+  };
+  return spy;
+}
+
+function inspectionFixture(): { workingCopy: WorkingCopy; slideId: string; snapshot: Deck } {
+  const source = sampleDeck();
+  const workingCopy = createWorkingCopy(source, 4);
+  const snapshot = structuredClone(workingCopy.deck);
+  return { workingCopy, slideId: source.slides[1].id, snapshot };
+}
+
+function editWorkingCopySlide(workingCopy: WorkingCopy, slideId: string): void {
+  const slide = workingCopy.deck.slides.find((item) => item.id === slideId);
+  if (!slide) throw new Error("missing slide");
+  const title = titleElement(slide);
+  editElements(workingCopy, slideId, [{ elementId: title.id, text: "レンダリング後に編集" }]);
+}
+
+describe("render_slide", () => {
+  it("passes a single-slide deck with preserved deck and slide IDs and returns a Buffer", async () => {
+    const { workingCopy, slideId } = inspectionFixture();
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy();
+    const deps: InspectionDeps = { render: render.fn, vision: vision.fn };
+    const runtime: InspectionRuntime = createInspectionRuntime(deps);
+    const image = await renderSlide(workingCopy, slideId, runtime);
+    expect(render.calls).toBe(1);
+    const passed = render.received[0];
+    expect(passed.id).toBe(workingCopy.deck.id);
+    expect(passed.slides).toHaveLength(1);
+    expect(passed.slides[0].id).toBe(slideId);
+    expect(Buffer.isBuffer(image)).toBe(true);
+  });
+
+  it("caches identical slide renders within a run and invalidates the cache after an edit", async () => {
+    const { workingCopy, slideId } = inspectionFixture();
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy();
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn });
+    const first = await renderSlide(workingCopy, slideId, runtime);
+    const second = await renderSlide(workingCopy, slideId, runtime);
+    expect(render.calls).toBe(1);
+    expect(second.equals(first)).toBe(true);
+    editWorkingCopySlide(workingCopy, slideId);
+    await renderSlide(workingCopy, slideId, runtime);
+    expect(render.calls).toBe(2);
+  });
+
+  it("rejects renders beyond maxRenderCalls with DocumentError and adds no dependency calls", async () => {
+    const { workingCopy, slideId } = inspectionFixture();
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy();
+    const limits: InspectionLimits = { maxRenderCalls: 1 };
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn }, limits);
+    await renderSlide(workingCopy, slideId, runtime);
+    editWorkingCopySlide(workingCopy, slideId);
+    await expect(renderSlide(workingCopy, slideId, runtime)).rejects.toThrow(DocumentError);
+    expect(render.calls).toBe(1);
+  });
+
+  it("keeps counters and working copy consistent when the render dependency throws", async () => {
+    const { workingCopy, slideId, snapshot } = inspectionFixture();
+    const render = makeRenderSpy(new Error("render 依存の失敗"));
+    const vision = makeVisionSpy();
+    const limits: InspectionLimits = { maxRenderCalls: 1 };
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn }, limits);
+    await expect(renderSlide(workingCopy, slideId, runtime)).rejects.toThrow("render 依存の失敗");
+    expect(render.calls).toBe(1);
+    expect(workingCopy.deck).toEqual(snapshot);
+    expect(workingCopy.operations).toHaveLength(0);
+    // 失敗呼び出しも上限に算入される: 次は上限拒否となり依存は追加呼び出しされない。
+    await expect(renderSlide(workingCopy, slideId, runtime)).rejects.toThrow(DocumentError);
+    expect(render.calls).toBe(1);
+  });
+});
+
+describe("inspect_visual", () => {
+  it("passes image, slideId, and intent to the vision dependency and leaves the working copy unchanged", async () => {
+    const { workingCopy, slideId, snapshot } = inspectionFixture();
+    const operationsSnapshot = [...workingCopy.operations];
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy();
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn });
+    const intent = "タイトルを強調したい";
+    const result = await inspectVisual(workingCopy, slideId, intent, runtime);
+    expect(vision.calls).toBe(1);
+    const request = vision.received[0];
+    expect(Buffer.isBuffer(request.image)).toBe(true);
+    expect(request.slideId).toBe(slideId);
+    expect(request.intent).toBe(intent);
+    expect(result.summary).toBeTypeOf("string");
+    expect(Array.isArray(result.issues)).toBe(true);
+    expect(result.meetsIntent).toBeTypeOf("boolean");
+    expect(workingCopy.deck).toEqual(snapshot);
+    expect(workingCopy.operations).toEqual(operationsSnapshot);
+  });
+
+  it("rejects inspections beyond maxVisionCalls with DocumentError and adds no dependency calls", async () => {
+    const { workingCopy, slideId } = inspectionFixture();
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy();
+    const limits: InspectionLimits = { maxVisionCalls: 1 };
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn }, limits);
+    await inspectVisual(workingCopy, slideId, "意図A", runtime);
+    await expect(inspectVisual(workingCopy, slideId, "意図B", runtime)).rejects.toThrow(DocumentError);
+    expect(vision.calls).toBe(1);
+  });
+
+  it("rejects inspectVisual on a vision-unsupported runtime while renderSlide still works", async () => {
+    const { workingCopy, slideId } = inspectionFixture();
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy();
+    const limits: InspectionLimits = { visionSupported: false };
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn }, limits);
+    await expect(inspectVisual(workingCopy, slideId, "意図A", runtime)).rejects.toThrow(DocumentError);
+    expect(vision.calls).toBe(0);
+    const image = await renderSlide(workingCopy, slideId, runtime);
+    expect(Buffer.isBuffer(image)).toBe(true);
+  });
+
+  it("keeps counters and working copy consistent when the vision dependency throws", async () => {
+    const { workingCopy, slideId, snapshot } = inspectionFixture();
+    const operationsSnapshot = [...workingCopy.operations];
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy(new Error("vision 依存の失敗"));
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn });
+    await expect(inspectVisual(workingCopy, slideId, "意図A", runtime)).rejects.toThrow("vision 依存の失敗");
+    expect(vision.calls).toBe(1);
+    expect(workingCopy.deck).toEqual(snapshot);
+    expect(workingCopy.operations).toEqual(operationsSnapshot);
   });
 });
