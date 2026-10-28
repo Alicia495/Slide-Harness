@@ -469,7 +469,7 @@ Do not paste the deck, the rendered image, or an editing protocol into your text
 export function toolLoopWorkflowInstruction(deck: Deck): string {
   return deck.slides.length
     ? "Read the deck with the tools, make the edits, inspect them, and end with commit_changes."
-    : "The deck has no slides. Create it in one write_deck call with 3-6 varied slides. Then inspect every slide with inspect_layout in one parallel step, apply at most one round of edits, and end with commit_changes.";
+    : "The deck has no slides. Create it in one write_deck call with 3-6 varied slides. Then inspect every slide with inspect_layout in one parallel step, apply one round of edits, inspect each slide at most once, and call commit_changes in the next step. Do not keep inspecting after fixing.";
 }
 
 // ツールループでは deck 全文を prompt へ入れない。概要は read ツールで取得させる。
