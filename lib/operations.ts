@@ -180,6 +180,13 @@ export function applyOperations(current: Deck, rawOperations: unknown): Deck {
         }
         break;
       }
+      case "replaceSlide": {
+        const index = deck.slides.findIndex((s) => s.id === op.slideId);
+        if (index < 0) throw new DocumentError("置き換えるスライドが見つかりません。");
+        if (op.slide.id !== op.slideId) throw new DocumentError("置き換え対象のスライド ID が一致しません。");
+        deck.slides[index] = structuredClone(op.slide);
+        break;
+      }
       case "updateImageProps": {
         const element = getElement(deck, op.slideId, op.elementId);
         if (element.kind !== "image") throw new DocumentError("画像を選択してください。");
@@ -211,6 +218,7 @@ export function operationSummaries(operations: Operation[]): string[] {
     updateChart: "グラフを更新", setTheme: "テーマを変更", addImage: "画像を追加",
     addShape: "図形を追加", addIcon: "アイコンを追加", deleteElement: "要素を削除",
     reorderElement: "重なり順を変更", updateImageProps: "画像設定を変更",
+    replaceSlide: "スライドを全面書き換え",
   };
   return operations.map((op) => labels[op.type]);
 }

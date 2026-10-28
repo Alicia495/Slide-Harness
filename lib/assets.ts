@@ -51,7 +51,16 @@ export async function readAsset(id: string): Promise<{ bytes: Buffer; mimeType: 
 
 // applyOperations を純粋に保つため、addImage の assetId 実在と資料所属は commit 境界で検証する。
 export async function assertImagesForProject(projectId: string, operations: Operation[]): Promise<void> {
-  const assetIds = new Set(operations.filter((op) => op.type === "addImage").map((op) => op.assetId));
+  const assetIds = new Set<string>();
+  for (const op of operations) {
+    if (op.type === "addImage") {
+      assetIds.add(op.assetId);
+    } else if (op.type === "replaceSlide") {
+      for (const element of op.slide.elements) {
+        if (element.kind === "image") assetIds.add(element.assetId);
+      }
+    }
+  }
   for (const assetId of assetIds) {
     if (!(await getAsset(assetId, projectId))) throw new DocumentError("追加する画像がこの資料に見つかりません。", 400);
   }

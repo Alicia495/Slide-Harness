@@ -193,6 +193,8 @@ export const OperationSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("deleteElement"), slideId: z.uuid(), elementId: z.uuid() }),
   z.object({ type: z.literal("reorderElement"), slideId: z.uuid(), elementId: z.uuid(), action: z.enum(["bringToFront", "sendToBack", "bringForward", "sendBackward"]) }),
   z.object({ type: z.literal("updateImageProps"), slideId: z.uuid(), elementId: z.uuid(), objectFit: z.enum(["contain", "cover", "fill"]).optional(), borderRadius: z.number().min(0).max(1).optional(), stroke: color.nullable().optional() }),
+  // Working Copy の write_slide 用。対象スライドを完全な SlideSchema で置き換える。
+  z.object({ type: z.literal("replaceSlide"), slideId: z.uuid(), slide: SlideSchema }),
 ]);
 export type Operation = z.infer<typeof OperationSchema>;
 
