@@ -1,6 +1,6 @@
 import { createAzure } from "@ai-sdk/azure";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { generateText, hasToolCall, stepCountIs, type LanguageModel } from "ai";
+import { generateText, hasToolCall, stepCountIs, streamText, type LanguageModel } from "ai";
 import { z } from "zod";
 import { type Deck, OperationSchema, slideTitle, type Operation } from "./document";
 import { applyOperations, DocumentError } from "./operations";
@@ -47,15 +47,20 @@ function modelFor(profile: ModelConfig): LanguageModel {
   throw new Error("選択した AI モデルが設定されていません。");
 }
 
-function samplingFor(profile: ModelConfig) {
+function samplingFor(profile: ModelConfig, thinking = false) {
   if (profile.provider === "vllm") return {
     temperature: 1.0, topP: 0.95, presencePenalty: 0.0,
     providerOptions: { vllm: {
       top_k: 20, min_p: 0.0, repetition_penalty: 1.0,
-      chat_template_kwargs: { enable_thinking: false },
+      chat_template_kwargs: { enable_thinking: thinking },
     } },
   };
   return { temperature: profile.temperature, topP: profile.topP };
+}
+
+// ツールループは思考内容をリアルタイムで返すため、reasoning を生成する設定で呼ぶ。
+export function toolLoopSampling(profile: ModelConfig) {
+  return samplingFor(profile, true);
 }
 
 // "tool" は Phase 3B のツール実行フェーズ。detail の追加項目は後方互換 (既存呼び出しは attempt のみ)。
@@ -462,6 +467,98 @@ function toolLoopDeckBrief(deck: Deck, target?: { slideId?: string; elementId?: 
   });
 }
 
+export type ToolLoopActivityEvent =
+  | { kind: "step"; step: number }
+  | { kind: "reasoning"; text: string }
+  | { kind: "text"; text: string }
+  | { kind: "tool"; status: "start" | "result" | "error"; tool: string; callId: string; args?: string; summary?: string };
+
+export type ActivityReporter = (event: ToolLoopActivityEvent) => void;
+
+// AI SDK fullStream の part を UI 配信用の最小構造へ緩く構造化する。
+export type ToolLoopStreamPart = {
+  type: string;
+  text?: string;
+  toolCallId?: string;
+  toolName?: string;
+  input?: unknown;
+  output?: unknown;
+  error?: unknown;
+};
+
+const ACTIVITY_FLUSH_CHARS = 160;
+const ACTIVITY_PAYLOAD_MAX = 400;
+
+function summarizeActivityPayload(value: unknown): string {
+  let raw: string;
+  if (typeof value === "string") raw = value;
+  else if (value instanceof Error) raw = value.message;
+  else {
+    try { raw = JSON.stringify(value) ?? String(value); } catch { raw = "unserializable payload"; }
+  }
+  return raw.length > ACTIVITY_PAYLOAD_MAX ? `${raw.slice(0, ACTIVITY_PAYLOAD_MAX - 1)}…` : raw;
+}
+
+// 実行中の思考・返答・ツール実行を、境界で束ねた最小イベントとして UI へ配信する。
+export function createToolLoopActivityFeed(emit: ActivityReporter) {
+  let step = 0;
+  let reasoning = "";
+  let text = "";
+  const flushReasoning = () => {
+    if (!reasoning) return;
+    emit({ kind: "reasoning", text: reasoning });
+    reasoning = "";
+  };
+  const flushText = () => {
+    if (!text) return;
+    emit({ kind: "text", text });
+    text = "";
+  };
+  return {
+    onPart(part: ToolLoopStreamPart): void {
+      switch (part.type) {
+        case "start-step":
+          flushReasoning();
+          flushText();
+          step += 1;
+          emit({ kind: "step", step });
+          break;
+        case "reasoning-delta":
+          flushText();
+          reasoning += part.text ?? "";
+          if (reasoning.length >= ACTIVITY_FLUSH_CHARS) flushReasoning();
+          break;
+        case "reasoning-end":
+          flushReasoning();
+          break;
+        case "text-delta":
+          flushReasoning();
+          text += part.text ?? "";
+          if (text.length >= ACTIVITY_FLUSH_CHARS) flushText();
+          break;
+        case "text-end":
+          flushText();
+          break;
+        case "tool-call":
+          flushReasoning();
+          flushText();
+          emit({ kind: "tool", status: "start", tool: part.toolName ?? "", callId: part.toolCallId ?? "", args: summarizeActivityPayload(part.input) });
+          break;
+        case "tool-result":
+          emit({ kind: "tool", status: "result", tool: part.toolName ?? "", callId: part.toolCallId ?? "", summary: summarizeActivityPayload(part.output) });
+          break;
+        case "tool-error":
+          emit({ kind: "tool", status: "error", tool: part.toolName ?? "", callId: part.toolCallId ?? "", summary: summarizeActivityPayload(part.error) });
+          break;
+      }
+    },
+    flush(): void {
+      flushReasoning();
+      flushText();
+    },
+  };
+}
+
 function reportToolEvent(onPhase: PhaseReporter | undefined, event: ToolEventRecord, startedAt: Map<string, number>): void {
   if (event.status === "start") startedAt.set(event.tool, Date.now());
   const started = startedAt.get(event.tool);
@@ -498,6 +595,7 @@ export async function generateToolLoopOperations(
   target?: { slideId?: string; elementId?: string },
   plan?: string | null,
   onPhase?: PhaseReporter,
+  onActivity?: ActivityReporter,
 ): Promise<ToolLoopResult> {
   const profile = await getModel(modelId);
   if (!profile) throw new DocumentError("AI モデルを選択してください。");
@@ -546,9 +644,13 @@ export async function generateToolLoopOperations(
   const planPrompt = plan ? `Approved concept plan (strictly follow its structure, slide titles, and messaging when editing):\n${plan}\n\n` : "";
   const prompt = `${planPrompt}Deck overview (source of truth; read ids with the tools): ${brief}\nSelected target: ${JSON.stringify(target ?? {})}\n\n${context.text}\n\nLatest user request: ${request}\nRead the deck with the tools, make the edits, inspect them, and end with commit_changes.`;
   onPhase?.("generating", { attempt: 1 });
-  let run;
+  const activity = createToolLoopActivityFeed((event) => onActivity?.(event));
+  let runText = "";
+  let runTotalTokens = 0;
+  let runSteps: readonly TokenUsageStep[] = [];
+  let runFinishReason = "";
   try {
-    run = await generateText({
+    const result = streamText({
       model,
       system: fixedPrompt,
       prompt,
@@ -560,21 +662,28 @@ export async function generateToolLoopOperations(
         () => isAgentBudgetExhausted(runContext),
       ],
       maxOutputTokens: generationOutputTokens(profile),
-      ...samplingFor(profile),
+      ...toolLoopSampling(profile),
       abortSignal: AbortSignal.timeout(TOOL_LOOP_MAX_DURATION_MS),
       timeout: { totalMs: TOOL_LOOP_MAX_DURATION_MS },
     });
+    for await (const part of result.fullStream) activity.onPart(part);
+    activity.flush();
+    const [text, usage, steps, finishReason] = await Promise.all([result.text, result.usage, result.steps, result.finishReason]);
+    runText = text;
+    runTotalTokens = usage.totalTokens ?? 0;
+    runSteps = steps;
+    runFinishReason = finishReason;
   } catch (error) {
+    activity.flush();
     if (isTimeoutError(error)) throw timeoutDocumentError();
     throw error;
   }
   const state = finalizeAgentRunState(runContext);
-  const totalTokens = run.usage.totalTokens ?? 0;
-  console.log(`[ai] toolLoop finishReason=${run.finishReason} committed=${state.commitRequested} steps=${run.steps.length} totalTokens=${totalTokens} tokenBudget=${tokenBudget}`);
-  const textReply = clampReply(run.text.trim());
+  console.log(`[ai] toolLoop finishReason=${runFinishReason} committed=${state.commitRequested} steps=${runSteps.length} totalTokens=${runTotalTokens} tokenBudget=${tokenBudget}`);
+  const textReply = clampReply(runText.trim());
   if (!state.commitRequested) {
     // commit されていない実行の operations は採用しない。
-    const exhausted = tokenUsageExceedsBudget(run.steps, tokenBudget);
+    const exhausted = tokenUsageExceedsBudget(runSteps, tokenBudget);
     return {
       reply: textReply || (exhausted
         ? "AI の実行が token 予算に達したため、変更を適用しませんでした。対象を絞って再試行してください。"

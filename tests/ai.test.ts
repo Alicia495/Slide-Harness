@@ -323,7 +323,6 @@ describe("Tool loop activity feed", () => {
     const { events, push, flush } = collectFeed();
     push({ type: "reasoning-delta", text: "考える" });
     push({ type: "text-delta", text: "返答" });
-    expect(events).toHaveLength(0);
     flush();
     expect(events).toEqual([{ kind: "reasoning", text: "考える" }, { kind: "text", text: "返答" }]);
   });

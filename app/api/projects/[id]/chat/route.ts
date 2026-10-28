@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { generateOperations, generatePlan, generateToolLoopOperations, selectAIGenerationMode, type PhaseReporter } from "@/lib/ai";
+import { generateOperations, generatePlan, generateToolLoopOperations, selectAIGenerationMode, type ActivityReporter, type PhaseReporter } from "@/lib/ai";
 import { assetPathsForProject } from "@/lib/assets";
 import { buildAIPersistenceDecision } from "@/lib/chat-policy";
 import { getModel } from "@/lib/model-settings";
@@ -38,6 +38,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         try { controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`)); } catch { /* クライアント切断時は無視 */ }
       };
       const onPhase: PhaseReporter = (phase, detail) => write({ type: "phase", phase, ...(detail ?? {}) });
+      const onActivity: ActivityReporter = (event) => write({ type: "activity", ...event });
       try {
         const project = (await getProject(id))!;
         if (body.mode === "plan") {
@@ -49,7 +50,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         }
         const generationMode = selectAIGenerationMode(process.env, project.deck);
         const generated = generationMode === "tool-loop"
-          ? await generateToolLoopOperations(id, project.deck, body.baseVersion, body.prompt, body.modelId, body.target, project.plan, onPhase)
+          ? await generateToolLoopOperations(id, project.deck, body.baseVersion, body.prompt, body.modelId, body.target, project.plan, onPhase, onActivity)
           : await generateOperations(id, project.deck, body.prompt, body.modelId, body.target, project.plan, onPhase);
         const reviewedDeck = generated.reviewedDeck ?? null;
         // 再適用判定は tool-loop のみ。legacy は現行どおり reviewedDeck override で保存する。
