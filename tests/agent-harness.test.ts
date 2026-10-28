@@ -456,7 +456,13 @@ const TOOL_LOOP_TOOL_NAMES = [
   "commit_changes",
 ] as const;
 
-type ToolEventRecord = { status: "start" | "complete" | "error"; tool: string };
+type ToolEventRecord = {
+  status: "start" | "complete" | "error";
+  tool: string;
+  slideId?: string;
+  operationCount?: number;
+  policy?: PolicyDecision;
+};
 
 function makeToolEventRecorder(): { events: ToolEventRecord[]; onToolEvent: (event: ToolEventRecord) => void } {
   const events: ToolEventRecord[] = [];
@@ -605,6 +611,22 @@ describe("tool events", () => {
     expect(events.some((event) => event.status === "start" && event.tool === "render_slide")).toBe(true);
     expect(events.some((event) => event.status === "error" && event.tool === "render_slide")).toBe(true);
     expect(events.some((event) => event.status === "complete" && event.tool === "render_slide")).toBe(false);
+  });
+
+  it("reports target ids, operation counts, and commit policy without document content", async () => {
+    const f = toolLoopFixture();
+    const slide = getSlide(f.workingCopy, f.slideId);
+    const title = titleElement(slide);
+    await executeAgentTool(f.registry, "edit_elements", {
+      slideId: f.slideId,
+      patches: [{ elementId: title.id, text: "監査対象の本文" }],
+    });
+    await executeAgentTool(f.registry, "commit_changes", { reply: "更新しました" });
+    const edit = f.events.find((event) => event.status === "complete" && event.tool === "edit_elements");
+    expect(edit).toMatchObject({ slideId: f.slideId, operationCount: 1 });
+    const commit = f.events.find((event) => event.status === "complete" && event.tool === "commit_changes");
+    expect(commit).toMatchObject({ operationCount: 1, policy: "auto" });
+    expect(JSON.stringify(f.events)).not.toContain("監査対象の本文");
   });
 });
 
