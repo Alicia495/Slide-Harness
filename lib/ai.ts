@@ -450,12 +450,21 @@ export function tokenUsageExceedsBudget(steps: readonly TokenUsageStep[], maxTok
 export const TOOL_LOOP_SYSTEM_PROMPT = `Read first, then edit. You change a PowerPoint presentation only by calling the supplied tools.
 You never write JavaScript, Markdown, shell commands, SQL, file paths, or any other executable code, and you never ask a runtime to execute code for you.
 Work in this order: read, edit, inspect, commit.
-- Read with get_deck_summary, then get_slide for the slide you intend to change. Use only the slideId and elementId values that the read tools returned. Never invent an id.
-- Edit with the typed tools only: edit_elements for text, position, size, and style changes on existing elements; write_slide to replace one whole slide; reflow_slide for an allowed alignment or distribution rule. Element edits on a single slide are applied automatically, and write or reflow changes are presented as a proposal.
+- When the deck has slides, read with get_deck_summary, then get_slide for the slide you intend to change. Use only the slideId and elementId values that the read tools returned. Never invent an id.
+- When the deck has no slides, create it with write_deck in one call using the blueprint layouts below, then inspect the created slides and fix them with the edit tools.
+- Edit with the typed tools only: edit_elements for text, position, size, and style changes on existing elements; write_slide to replace one whole slide; reflow_slide for an allowed alignment or distribution rule. Element edits on a single slide are applied automatically, and write, reflow, and write_deck changes are presented as a proposal.
 - Inspect with inspect_layout after each edit, and with inspect_visual after render_slide whenever the request concerns visual quality such as emphasis, spacing, alignment, imagery, or readability. Use render_slide when you need to see the rendered slide. inspect_visual never changes the deck.
 - Finish with an explicit commit_changes call carrying a short Japanese reply. Nothing is applied until commit_changes succeeds. When you have made no change, do not call commit_changes.
 The canvas is 13.333 x 7.5 inches, coordinates stay inside it, and colors use #RRGGBB. The document theme is binding; do not change the theme unless the user explicitly asks.
+Blueprint layouts: title, bullets, twoColumn, cards, steps, kpi, comparison, chart, table, section. Design visual-first: prefer cards, steps, kpi, comparison, chart, or table over bullets, and use charts only with concrete numeric data.
 Do not paste the deck, the rendered image, or an editing protocol into your text. Use the tools to read the deck and use commit_changes to finish.`;
+
+// 実行対象の Deck 状態に応じた直近の指示。空 Deck は write_deck 作成、既存 Deck は読み取り編集を優先させる。
+export function toolLoopWorkflowInstruction(deck: Deck): string {
+  return deck.slides.length
+    ? "Read the deck with the tools, make the edits, inspect them, and end with commit_changes."
+    : "The deck has no slides. Create it in one write_deck call with 3-6 varied slides, inspect the result, fix any layout issues, and end with commit_changes.";
+}
 
 // ツールループでは deck 全文を prompt へ入れない。概要は read ツールで取得させる。
 function toolLoopDeckBrief(deck: Deck, target?: { slideId?: string; elementId?: string }): string {
@@ -642,7 +651,7 @@ export async function generateToolLoopOperations(
     }
   }, pending);
   const planPrompt = plan ? `Approved concept plan (strictly follow its structure, slide titles, and messaging when editing):\n${plan}\n\n` : "";
-  const prompt = `${planPrompt}Deck overview (source of truth; read ids with the tools): ${brief}\nSelected target: ${JSON.stringify(target ?? {})}\n\n${context.text}\n\nLatest user request: ${request}\nRead the deck with the tools, make the edits, inspect them, and end with commit_changes.`;
+  const prompt = `${planPrompt}Deck overview (source of truth; read ids with the tools): ${brief}\nSelected target: ${JSON.stringify(target ?? {})}\n\n${context.text}\n\nLatest user request: ${request}\n${toolLoopWorkflowInstruction(deck)}`;
   onPhase?.("generating", { attempt: 1 });
   const activity = createToolLoopActivityFeed((event) => onActivity?.(event));
   let runText = "";
