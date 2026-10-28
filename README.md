@@ -19,6 +19,8 @@
 
 OpenAI 互換モデルへの生成リクエストは `temperature=1.0`、`top_p=0.95`、`top_k=20`、`min_p=0.0`、`presence_penalty=0.0`、`repetition_penalty=1.0` に固定します。会話の圧縮と文書操作では、推論だけで出力枠を使い切るモデルに備えて `enable_thinking=false` も送ります。Azure OpenAI は対応しないパラメータがあるため、設定画面で Temperature と Top P を指定します。
 
+`AI_TOOL_LOOP_ENABLED=true` の場合、既存資料の AI 編集は `get_deck_summary`、`get_slide`、`edit_elements`、`write_slide`、`render_slide`、`inspect_layout`、`inspect_visual`、`reflow_slide`、`commit_changes` を使う Tool Loop Harness で実行します。AI は必要なスライドだけを読み、隔離された Working Copy を編集・検査してから変更を保存します。空資料の初回生成は従来の構造化操作生成を使います。接続先モデルに native tool calling の対応と十分な指示追従能力が必要です。正常に動作しないモデルでは `AI_TOOL_LOOP_ENABLED=false` にして従来経路へ戻せます。
+
 画面で入力する API キーは AES-256-GCM で暗号化して PostgreSQL に保存します。暗号化キーは `.env` の `AI_SETTINGS_ENCRYPTION_KEY` に32バイトの乱数を Base64 で設定してください。例: `node -p "require('node:crypto').randomBytes(32).toString('base64')"`。この値はバックアップし、変更すると保存済み API キーを復号できなくなります。認証不要のローカル AI なら設定は不要です。
 
 会話では、推定入力トークン数と出力上限の合計が最大コンテキスト長の80%に達した時、古い会話を日付付きの観測記録へ変換します。直近の会話は原文のまま残し、観測記録が増えたら決定事項・制約・未解決事項を再整理します。元のメッセージはDBに残ります。トークン数はモデル共通の概算であり、接続先の実際のトークナイザーとは差があります。
@@ -62,5 +64,6 @@ PostgreSQL をローカルで起動できない場合、開発用の PGlite サ�
 - 初期版は認証を行いません。接続できる人は全資料を閲覧・編集でき、操作した人物を区別できません。社内 LAN のファイアウォールで公開範囲を制限してください。
 - 既存 PPTX の読み込み、PowerPoint 側の編集内容の再取り込み、表・グラフの画面上でのデータ編集は初期版の対象外です。.potx テンプレートはテーマ（配色・フォント）の抽出にのみ使い、スライドマスターやレイアウト内容の取り込みは行いません。
 - AI は任意コードを実行せず、決められた文書操作だけを返します。サーバーで検証してから適用します。
+- Tool Loop の途中状態は正本へ保存されません。`commit_changes` が成功したときだけ、開始版との競合確認後に Version または変更案として保存します。
 
 詳細な要件は [REQUIREMENTS.md](./REQUIREMENTS.md) を参照してください。
