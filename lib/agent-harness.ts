@@ -1,7 +1,12 @@
+import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import {
+  DeckSchema,
+  OperationSchema,
   SLIDE_H,
   SLIDE_W,
+  SlideBlueprintSchema,
+  SlideSchema,
   slideFromBlueprint,
   slideTitle,
   type Deck,
@@ -118,7 +123,7 @@ const CONTENT_KINDS: readonly Element["kind"][] = ["text", "table", "chart", "im
 const DEFAULT_MAX_RENDER_CALLS = 3;
 const DEFAULT_MAX_VISION_CALLS = 2;
 
-const VisualInsightSchema = z.object({
+export const VisualInsightSchema = z.object({
   summary: z.string().max(600),
   issues: z.array(z.string().max(400)).max(8),
   meetsIntent: z.boolean(),
@@ -461,4 +466,377 @@ function isWideChar(char: string): boolean {
 
 function round(value: number): string {
   return Number.isFinite(value) ? value.toFixed(2) : "NaN";
+}
+
+// --- Phase 3B: AI SDK ツールループの登録と実行予算 (ADR-0002) ---
+
+export const AGENT_TOOL_NAMES = [
+  "get_deck_summary",
+  "get_slide",
+  "edit_elements",
+  "write_slide",
+  "render_slide",
+  "inspect_layout",
+  "inspect_visual",
+  "reflow_slide",
+  "commit_changes",
+] as const;
+
+export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
+
+export type ToolEventRecord = { status: "start" | "complete" | "error"; tool: string };
+export type ToolEventReporter = (event: ToolEventRecord) => void;
+
+// 1 実行あたりの予算。now は注入式時計で、時間判定を決定的にする。
+export type AgentRunBudget = {
+  maxSteps: number;
+  maxDurationMs: number;
+  startedAt: number;
+  stepsUsed: number;
+  now: () => number;
+};
+
+export type AgentRunContext = {
+  workingCopy: WorkingCopy;
+  runtime: InspectionRuntime;
+  onToolEvent?: ToolEventReporter;
+  budget?: AgentRunBudget;
+};
+
+export type AgentRunState = {
+  commitRequested: boolean;
+  operations: Operation[];
+  workingDeck: Deck | null;
+  policy: PolicyDecision | null;
+  reply: string | null;
+  toolsUsed: AgentToolName[];
+};
+
+type RunRecord = { context: AgentRunContext; state: AgentRunState };
+type RawToolHandler = (input: Record<string, unknown>, record: RunRecord) => Promise<unknown>;
+
+// AI SDK の Tool を、実行基盤の参照から引ける最小の参照型へ寄せる。
+export type AgentToolHandle = { inputSchema: unknown; execute?: unknown };
+export type AgentToolRegistry = Record<string, AgentToolHandle>;
+
+const COMMIT_REPLY_MAX = 1200;
+const TOOL_PATCH_MAX = 20;
+const TOOL_ELEMENT_IDS_MAX = 24;
+
+const ElementPatchSchema = z.object({
+  elementId: z.uuid(),
+  text: z.string().max(8000).optional(),
+  x: z.number().finite().min(0).max(SLIDE_W).optional(),
+  y: z.number().finite().min(0).max(SLIDE_H).optional(),
+  w: z.number().finite().positive().max(SLIDE_W).optional(),
+  h: z.number().finite().positive().max(SLIDE_H).optional(),
+  fontSize: z.number().min(8).max(96).optional(),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
+  bold: z.boolean().optional(),
+  rotation: z.number().min(0).max(360).optional(),
+});
+
+const ReflowRuleSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("alignRow"), elementIds: z.array(z.uuid()).min(2).max(TOOL_ELEMENT_IDS_MAX), y: z.number().finite().min(0).max(SLIDE_H) }),
+  z.object({ type: z.literal("alignColumn"), elementIds: z.array(z.uuid()).min(2).max(TOOL_ELEMENT_IDS_MAX), x: z.number().finite().min(0).max(SLIDE_W) }),
+  z.object({ type: z.literal("distributeHorizontally"), elementIds: z.array(z.uuid()).min(2).max(TOOL_ELEMENT_IDS_MAX), x: z.number().finite().min(0).max(SLIDE_W), width: z.number().finite().positive().max(SLIDE_W) }),
+  z.object({ type: z.literal("distributeVertically"), elementIds: z.array(z.uuid()).min(2).max(TOOL_ELEMENT_IDS_MAX), y: z.number().finite().min(0).max(SLIDE_H), height: z.number().finite().positive().max(SLIDE_H) }),
+]);
+
+export const DeckSummarySchema = z.object({
+  title: z.string(),
+  slides: z.array(z.object({ id: z.string(), index: z.number(), title: z.string(), elementCount: z.number() })),
+});
+
+export const ToolResultSchema = z.object({
+  deck: DeckSchema,
+  operations: z.array(OperationSchema),
+  changeKinds: z.array(z.string()),
+});
+
+export const LayoutIssueSchema = z.object({
+  kind: z.enum(["overflow", "overlap", "smallText", "denseText"]),
+  slideId: z.string(),
+  elementIds: z.array(z.string()),
+  detail: z.string(),
+});
+
+const CommitResultSchema = z.object({
+  committed: z.literal(true),
+  policy: z.enum(["auto", "proposal"]),
+  operationCount: z.number().int().positive(),
+});
+
+// 入力契約は Zod スキーマのみ。実行前に必ずここで検証する。
+const toolInputSchemas = {
+  get_deck_summary: z.object({}),
+  get_slide: z.object({ slideId: z.uuid() }),
+  edit_elements: z.object({ slideId: z.uuid(), patches: z.array(ElementPatchSchema).min(1).max(TOOL_PATCH_MAX) }),
+  write_slide: z.object({ slideId: z.uuid(), blueprint: SlideBlueprintSchema }),
+  render_slide: z.object({ slideId: z.uuid() }),
+  inspect_layout: z.object({ slideId: z.uuid() }),
+  inspect_visual: z.object({ slideId: z.uuid(), intent: z.string().trim().min(1).max(500) }),
+  reflow_slide: z.object({ slideId: z.uuid(), rule: ReflowRuleSchema }),
+  commit_changes: z.object({ reply: z.string().trim().min(1).max(COMMIT_REPLY_MAX) }),
+};
+
+function isWorkingCopyLike(value: unknown): boolean {
+  if (!(value instanceof Object)) return false;
+  return Array.isArray(Reflect.get(value, "operations"))
+    && Array.isArray(Reflect.get(value, "changeKinds"))
+    && typeof Reflect.get(value, "baseVersion") === "number"
+    && DeckSchema.safeParse(Reflect.get(value, "deck")).success
+    && DeckSchema.safeParse(Reflect.get(value, "sourceDeck")).success;
+}
+
+function isInspectionRuntimeLike(value: unknown): boolean {
+  if (!(value instanceof Object)) return false;
+  const deps = Reflect.get(value, "deps");
+  return deps instanceof Object
+    && typeof Reflect.get(deps, "render") === "function"
+    && typeof Reflect.get(deps, "vision") === "function"
+    && Reflect.get(value, "renderCache") instanceof Map
+    && typeof Reflect.get(value, "renderCalls") === "number"
+    && typeof Reflect.get(value, "visionCalls") === "number"
+    && typeof Reflect.get(value, "visionSupported") === "boolean";
+}
+
+function isAgentRunBudgetLike(value: unknown): boolean {
+  if (!(value instanceof Object)) return false;
+  return typeof Reflect.get(value, "maxSteps") === "number"
+    && typeof Reflect.get(value, "maxDurationMs") === "number"
+    && typeof Reflect.get(value, "startedAt") === "number"
+    && typeof Reflect.get(value, "stepsUsed") === "number"
+    && typeof Reflect.get(value, "now") === "function";
+}
+
+const AgentRunContextSchema = z.looseObject({
+  workingCopy: z.custom<WorkingCopy>(isWorkingCopyLike),
+  runtime: z.custom<InspectionRuntime>(isInspectionRuntimeLike),
+  onToolEvent: z.custom<ToolEventReporter>((value) => typeof value === "function").optional(),
+  budget: z.custom<AgentRunBudget>(isAgentRunBudgetLike).optional(),
+});
+
+// 実行状態は context オブジェクトそのものをキーに共有する (Working Copy / Runtime を含む)。
+const runRecords = new WeakMap<object, RunRecord>();
+const registryRecords = new WeakMap<object, RunRecord>();
+const registryToolSets = new WeakMap<object, ToolSet>();
+
+function runRecordOf(context: unknown): RunRecord {
+  if (!(context instanceof Object)) throw new DocumentError("実行コンテキストが不正です。");
+  const record = runRecords.get(context);
+  if (!record) throw new DocumentError("この実行の登録情報が見つかりません。");
+  return record;
+}
+
+export function getAgentRunState(context: unknown): AgentRunState {
+  return runRecordOf(context).state;
+}
+
+export function createAgentRunBudget(options: { maxSteps: number; maxDurationMs: number; now: () => number }): AgentRunBudget {
+  return {
+    maxSteps: positiveInteger(options.maxSteps, "step 上限"),
+    maxDurationMs: positiveInteger(options.maxDurationMs, "時間上限"),
+    startedAt: options.now(),
+    stepsUsed: 0,
+    now: options.now,
+  };
+}
+
+export function assertAgentTime(budget: AgentRunBudget): void {
+  if (budget.now() - budget.startedAt >= budget.maxDurationMs) {
+    throw new DocumentError("実行時間の予算を超えました。", 504);
+  }
+}
+
+export function consumeAgentStep(budget: AgentRunBudget): void {
+  assertAgentTime(budget);
+  if (budget.stepsUsed >= budget.maxSteps) {
+    throw new DocumentError("実行ステップの予算を超えました。", 429);
+  }
+  budget.stepsUsed += 1;
+}
+
+export function isToolLoopEnabled(env: Record<string, string | undefined>, deck: Deck): boolean {
+  return env.AI_TOOL_LOOP_ENABLED === "true" && deck.slides.length > 0;
+}
+
+// write / reflow は常に proposal。同一 slide の要素編集のみ auto を許す。
+function commitPolicy(record: RunRecord): PolicyDecision {
+  const { toolsUsed } = record.state;
+  if (toolsUsed.includes("write_slide") || toolsUsed.includes("reflow_slide")) return "proposal";
+  return classifyChanges({ tool: "edit", operations: record.context.workingCopy.operations });
+}
+
+const rawToolHandlersByTool: Record<AgentToolName, RawToolHandler> = {
+  get_deck_summary: async (_input, record) => getDeckSummary(record.context.workingCopy),
+  get_slide: async (input, record) => {
+    const { slideId } = toolInputSchemas.get_slide.parse(input);
+    return getSlide(record.context.workingCopy, slideId);
+  },
+  edit_elements: async (input, record) => {
+    const { slideId, patches } = toolInputSchemas.edit_elements.parse(input);
+    return editElements(record.context.workingCopy, slideId, patches);
+  },
+  write_slide: async (input, record) => {
+    const { slideId, blueprint } = toolInputSchemas.write_slide.parse(input);
+    return writeSlide(record.context.workingCopy, slideId, blueprint);
+  },
+  render_slide: async (input, record) => {
+    const { slideId } = toolInputSchemas.render_slide.parse(input);
+    return renderSlide(record.context.workingCopy, slideId, record.context.runtime);
+  },
+  inspect_layout: async (input, record) => {
+    const { slideId } = toolInputSchemas.inspect_layout.parse(input);
+    return inspectLayout(record.context.workingCopy.deck, slideId);
+  },
+  inspect_visual: async (input, record) => {
+    const { slideId, intent } = toolInputSchemas.inspect_visual.parse(input);
+    return inspectVisual(record.context.workingCopy, slideId, intent, record.context.runtime);
+  },
+  reflow_slide: async (input, record) => {
+    const { slideId, rule } = toolInputSchemas.reflow_slide.parse(input);
+    return reflowSlide(record.context.workingCopy, slideId, rule);
+  },
+  commit_changes: async (input, record) => {
+    const { reply } = toolInputSchemas.commit_changes.parse(input);
+    const { workingCopy } = record.context;
+    if (workingCopy.operations.length === 0) throw new DocumentError("コミットする変更がありません。");
+    const state = record.state;
+    state.commitRequested = true;
+    state.reply = reply;
+    state.operations = [...workingCopy.operations];
+    state.workingDeck = structuredClone(workingCopy.deck);
+    state.policy = commitPolicy(record);
+    return { committed: true, policy: state.policy, operationCount: state.operations.length };
+  },
+};
+
+// 生結果をそのままモデルへ返さない。画像は要約、deck 本文は返さない。
+function summarizeToolResult(toolName: AgentToolName, result: unknown): Record<string, unknown> {
+  switch (toolName) {
+    case "get_deck_summary": {
+      const summary = DeckSummarySchema.parse(result);
+      return { title: summary.title, slides: summary.slides };
+    }
+    case "get_slide":
+      return { slide: SlideSchema.parse(result) };
+    case "edit_elements":
+    case "write_slide":
+    case "reflow_slide": {
+      const applied = ToolResultSchema.parse(result);
+      return { operations: applied.operations, changeKinds: applied.changeKinds };
+    }
+    case "render_slide":
+      return { rendered: true, byteLength: Buffer.isBuffer(result) ? result.byteLength : 0 };
+    case "inspect_layout":
+      return { issues: LayoutIssueSchema.array().parse(result) };
+    case "inspect_visual":
+      return { insight: VisualInsightSchema.parse(result) };
+    case "commit_changes":
+      return CommitResultSchema.parse(result);
+  }
+}
+
+async function invokeAgentTool(record: RunRecord, toolName: AgentToolName, input: Record<string, unknown>): Promise<unknown> {
+  const { context, state } = record;
+  if (context.budget) {
+    assertAgentTime(context.budget);
+    consumeAgentStep(context.budget);
+  }
+  context.onToolEvent?.({ status: "start", tool: toolName });
+  try {
+    const result = await rawToolHandlersByTool[toolName](input, record);
+    if (!state.toolsUsed.includes(toolName)) state.toolsUsed.push(toolName);
+    context.onToolEvent?.({ status: "complete", tool: toolName });
+    return result;
+  } catch (error) {
+    context.onToolEvent?.({ status: "error", tool: toolName });
+    throw error;
+  }
+}
+
+export function createAgentToolRegistry(context: unknown): AgentToolRegistry {
+  if (!(context instanceof Object)) throw new DocumentError("実行コンテキストが不正です。");
+  const validated = AgentRunContextSchema.parse(context);
+  const record: RunRecord = {
+    context: validated,
+    state: { commitRequested: false, operations: [], workingDeck: null, policy: null, reply: null, toolsUsed: [] },
+  };
+  runRecords.set(context, record);
+  const toolSet: ToolSet = {
+    get_deck_summary: tool({
+      description: "Summarize every slide of the current working deck: slide id, index, title, and element count.",
+      inputSchema: toolInputSchemas.get_deck_summary,
+      execute: async (input) => summarizeToolResult("get_deck_summary", await invokeAgentTool(record, "get_deck_summary", input)),
+    }),
+    get_slide: tool({
+      description: "Read one slide with its exact element ids before editing it.",
+      inputSchema: toolInputSchemas.get_slide,
+      execute: async (input) => summarizeToolResult("get_slide", await invokeAgentTool(record, "get_slide", input)),
+    }),
+    edit_elements: tool({
+      description: "Apply element-level patches (text, position, size, style) to existing element ids of one slide.",
+      inputSchema: toolInputSchemas.edit_elements,
+      execute: async (input) => summarizeToolResult("edit_elements", await invokeAgentTool(record, "edit_elements", input)),
+    }),
+    write_slide: tool({
+      description: "Replace the whole target slide with a slide blueprint. Requires an approved layout choice.",
+      inputSchema: toolInputSchemas.write_slide,
+      execute: async (input) => summarizeToolResult("write_slide", await invokeAgentTool(record, "write_slide", input)),
+    }),
+    render_slide: tool({
+      description: "Render the target slide to an image. Returns only a rendered flag and byte length.",
+      inputSchema: toolInputSchemas.render_slide,
+      execute: async (input) => summarizeToolResult("render_slide", await invokeAgentTool(record, "render_slide", input)),
+    }),
+    inspect_layout: tool({
+      description: "Check the target slide for overflow, overlap, small text, and dense text.",
+      inputSchema: toolInputSchemas.inspect_layout,
+      execute: async (input) => summarizeToolResult("inspect_layout", await invokeAgentTool(record, "inspect_layout", input)),
+    }),
+    inspect_visual: tool({
+      description: "Inspect the rendered target slide image against the stated intent.",
+      inputSchema: toolInputSchemas.inspect_visual,
+      execute: async (input) => summarizeToolResult("inspect_visual", await invokeAgentTool(record, "inspect_visual", input)),
+    }),
+    reflow_slide: tool({
+      description: "Align or distribute existing elements of one slide with an allowed reflow rule.",
+      inputSchema: toolInputSchemas.reflow_slide,
+      execute: async (input) => summarizeToolResult("reflow_slide", await invokeAgentTool(record, "reflow_slide", input)),
+    }),
+    commit_changes: tool({
+      description: "Commit the accumulated changes of this run. Required before any change is applied.",
+      inputSchema: toolInputSchemas.commit_changes,
+      execute: async (input) => summarizeToolResult("commit_changes", await invokeAgentTool(record, "commit_changes", input)),
+    }),
+  };
+  const registry: AgentToolRegistry = toolSet;
+  registryToolSets.set(registry, toolSet);
+  for (const toolName of AGENT_TOOL_NAMES) {
+    const entry = toolSet[toolName];
+    if (!entry) throw new DocumentError("ツールの登録に失敗しました。");
+    registryRecords.set(entry, record);
+  }
+  return registry;
+}
+
+// generateText へ渡すツール集合 (AI SDK の Tool 型)。実行ごとに 1 組だけ対応する。
+export function getAgentToolSet(registry: AgentToolRegistry): ToolSet {
+  const toolSet = registryToolSets.get(registry);
+  if (!toolSet) throw new DocumentError("この実行のツール登録が見つかりません。");
+  return toolSet;
+}
+
+export async function executeAgentTool(
+  registry: AgentToolRegistry,
+  toolName: AgentToolName,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const entry = registry[toolName];
+  if (!entry) throw new DocumentError("指定されたツールは登録されていません。");
+  const record = registryRecords.get(entry);
+  if (!record) throw new DocumentError("この実行の登録情報が見つかりません。");
+  const parsedInput = toolInputSchemas[toolName].parse(input);
+  return invokeAgentTool(record, toolName, parsedInput);
 }

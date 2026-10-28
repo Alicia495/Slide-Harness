@@ -1,6 +1,6 @@
 import { createAzure } from "@ai-sdk/azure";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { generateText, type LanguageModel } from "ai";
+import { generateText, hasToolCall, stepCountIs, type LanguageModel } from "ai";
 import { z } from "zod";
 import { type Deck, OperationSchema, slideTitle, type Operation } from "./document";
 import { applyOperations, DocumentError } from "./operations";
@@ -9,6 +9,20 @@ import { prepareConversationContext } from "./context-memory";
 import { assetPathsForProject } from "./assets";
 import { buildPptx } from "./pptx";
 import { renderPptxPreview } from "./render";
+import {
+  createAgentRunBudget,
+  createAgentToolRegistry,
+  createInspectionRuntime,
+  createWorkingCopy,
+  getAgentRunState,
+  getAgentToolSet,
+  isToolLoopEnabled,
+  VisualInsightSchema,
+  type InspectionDeps,
+  type PolicyDecision,
+  type ToolEventRecord,
+  type VisualInsight,
+} from "./agent-harness";
 
 export type { ModelConfig, ModelProfile } from "./model-settings";
 function modelFor(profile: ModelConfig): LanguageModel {
@@ -43,8 +57,9 @@ function samplingFor(profile: ModelConfig) {
   return { temperature: profile.temperature, topP: profile.topP };
 }
 
-export type AIPhase = "context" | "generating" | "repair" | "vision" | "rendering";
-export type PhaseReporter = (phase: AIPhase, detail?: { attempt?: number }) => void;
+// "tool" は Phase 3B のツール実行フェーズ。detail の追加項目は後方互換 (既存呼び出しは attempt のみ)。
+export type AIPhase = "context" | "generating" | "repair" | "vision" | "rendering" | "tool";
+export type PhaseReporter = (phase: AIPhase, detail?: { attempt?: number; tool?: string; status?: ToolEventRecord["status"] }) => void;
 
 export const REPLY_MAX = 2400;
 export const GENERATE_TIMEOUT_MS = 600000;
@@ -400,6 +415,151 @@ export async function generateOperations(projectId: string, deck: Deck, request:
     }
   }
   throw validationFailureError(issue, "operations", modelId);
+}
+
+export const TOOL_LOOP_MAX_STEPS = 10;
+export const TOOL_LOOP_MAX_DURATION_MS = 900000;
+
+export const TOOL_LOOP_SYSTEM_PROMPT = `Read first, then edit. You change a PowerPoint presentation only by calling the supplied tools.
+You never write JavaScript, Markdown, shell commands, SQL, file paths, or any other executable code, and you never ask a runtime to execute code for you.
+Work in this order: read, edit, inspect, commit.
+- Read with get_deck_summary, then get_slide for the slide you intend to change. Use only the slideId and elementId values that the read tools returned. Never invent an id.
+- Edit with the typed tools only: edit_elements for text, position, size, and style changes on existing elements; write_slide to replace one whole slide; reflow_slide for an allowed alignment or distribution rule. Element edits on a single slide are applied automatically, and write or reflow changes are presented as a proposal.
+- Inspect with inspect_layout after each edit, and with inspect_visual after render_slide whenever the request concerns visual quality such as emphasis, spacing, alignment, imagery, or readability. Use render_slide when you need to see the rendered slide. inspect_visual never changes the deck.
+- Finish with an explicit commit_changes call carrying a short Japanese reply. Nothing is applied until commit_changes succeeds. When you have made no change, do not call commit_changes.
+The canvas is 13.333 x 7.5 inches, coordinates stay inside it, and colors use #RRGGBB. The document theme is binding; do not change the theme unless the user explicitly asks.
+Do not paste the deck, the rendered image, or an editing protocol into your text. Use the tools to read the deck and use commit_changes to finish.`;
+
+// ツールループでは deck 全文を prompt へ入れない。概要は read ツールで取得させる。
+function toolLoopDeckBrief(deck: Deck, target?: { slideId?: string; elementId?: string }): string {
+  return JSON.stringify({
+    title: deck.title,
+    slideCount: deck.slides.length,
+    slides: deck.slides.map((slide, index) => ({ index: index + 1, id: slide.id, title: slideTitle(slide).slice(0, 80) })),
+    selectedTarget: { slideId: target?.slideId ?? null, elementId: target?.elementId ?? null },
+  });
+}
+
+function reportToolEvent(onPhase: PhaseReporter | undefined, event: ToolEventRecord, startedAt: Map<string, number>): void {
+  if (event.status === "start") startedAt.set(event.tool, Date.now());
+  const started = startedAt.get(event.tool);
+  const durationMs = started === undefined ? 0 : Date.now() - started;
+  // 秘密や文面をログへ出さず、ツール名・状態・所要時間だけを構造化して残す。
+  console.log(`[ai] tool=${event.tool} status=${event.status} durationMs=${durationMs}`);
+  onPhase?.("tool", { tool: event.tool, status: event.status });
+  if (event.status !== "start") startedAt.delete(event.tool);
+}
+
+async function requestVisualInsight(
+  model: LanguageModel, profile: ModelConfig, image: Buffer, slideId: string, intent: string,
+): Promise<VisualInsight> {
+  const instruction = [
+    "You inspect one rendered PowerPoint slide image against the user's intent, as the author of the deck.",
+    "Judge text overflow, overlap, clipping, weak contrast, inconsistent alignment, excessive text, missing visual structure, and image readability.",
+    'Return ONLY one JSON object: {"summary":"short Japanese report of what you saw","issues":["short Japanese issues, empty when none"],"meetsIntent":true|false}.',
+    `Rendered slide id: ${slideId}`,
+    `User intent: ${intent.slice(0, 500)}`,
+  ].join("\n");
+  const text = await requestVision(model, profile, instruction, [image]);
+  return VisualInsightSchema.parse(extractJSON(text));
+}
+
+export type ToolLoopResult = AIResult & { compacted: boolean; reviewedDeck?: Deck; review?: DeckReviewReport; policy?: PolicyDecision };
+
+// Phase 3B: AI SDK のツールループで読み取り -> 編集 -> 検査 -> commit_changes を実行する。
+export async function generateToolLoopOperations(
+  projectId: string,
+  deck: Deck,
+  baseVersion: number,
+  request: string,
+  modelId: string,
+  target?: { slideId?: string; elementId?: string },
+  plan?: string | null,
+  onPhase?: PhaseReporter,
+): Promise<ToolLoopResult> {
+  const profile = await getModel(modelId);
+  if (!profile) throw new DocumentError("AI モデルを選択してください。");
+  if (profile.provider === "demo") throw new DocumentError("ツールループはデモモードで実行できません。Vision 対応を確認したモデルを選択してください。");
+  if (!profile.visionSupported) throw new DocumentError("選択したモデルは Vision 疎通テストに合格していません。AI 設定で接続を確認してください。");
+  if (!isToolLoopEnabled(process.env, deck)) throw new DocumentError("ツールループは有効ではありません。");
+  const model = modelFor(profile);
+  const workingCopy = createWorkingCopy(deck, baseVersion);
+  const inspectionDeps: InspectionDeps = {
+    // render は対象スライド 1 件に絞った deck を PPTX 化し、先頭画像を返す。
+    render: async (scopedDeck) => {
+      const pptx = await buildPptx(scopedDeck, await assetPathsForProject(projectId));
+      const images = await renderPptxPreview(pptx);
+      const image = images[0];
+      if (!image) throw new DocumentError("スライドの画像を生成できませんでした。", 502);
+      return image;
+    },
+    vision: ({ image, slideId, intent }) => requestVisualInsight(model, profile, image, slideId, intent),
+  };
+  const runtime = createInspectionRuntime(inspectionDeps, { visionSupported: profile.visionSupported });
+  const budget = createAgentRunBudget({ maxSteps: TOOL_LOOP_MAX_STEPS, maxDurationMs: TOOL_LOOP_MAX_DURATION_MS, now: () => Date.now() });
+  const toolStarts = new Map<string, number>();
+  const runContext = {
+    workingCopy,
+    runtime,
+    budget,
+    onToolEvent: (event: ToolEventRecord) => reportToolEvent(onPhase, event, toolStarts),
+  };
+  const registry = createAgentToolRegistry(runContext);
+  const tools = getAgentToolSet(registry);
+  const brief = toolLoopDeckBrief(deck, target);
+  const fixedPrompt = `${TOOL_LOOP_SYSTEM_PROMPT}\nDeck overview (use the read tools for details): ${brief}`;
+  const pending = { id: crypto.randomUUID(), role: "user" as const, content: request,
+    metadata: { modelId, mode: "tool-loop", target }, createdAt: new Date().toISOString() };
+  onPhase?.("context");
+  const context = await prepareConversationContext(projectId, profile, fixedPrompt, async (instruction, maxOutputTokens) => {
+    try {
+      const result = await generateText({ model, prompt: instruction, maxOutputTokens, ...samplingFor(profile), abortSignal: AbortSignal.timeout(GENERATE_TIMEOUT_MS) });
+      return result.text;
+    } catch (error) {
+      if (isTimeoutError(error)) throw timeoutDocumentError();
+      throw error;
+    }
+  }, pending);
+  const planPrompt = plan ? `Approved concept plan (strictly follow its structure, slide titles, and messaging when editing):\n${plan}\n\n` : "";
+  const prompt = `${planPrompt}Deck overview (source of truth; read ids with the tools): ${brief}\nSelected target: ${JSON.stringify(target ?? {})}\n\n${context.text}\n\nLatest user request: ${request}\nRead the deck with the tools, make the edits, inspect them, and end with commit_changes.`;
+  onPhase?.("generating", { attempt: 1 });
+  let run;
+  try {
+    run = await generateText({
+      model,
+      system: fixedPrompt,
+      prompt,
+      tools,
+      stopWhen: [hasToolCall("commit_changes"), stepCountIs(TOOL_LOOP_MAX_STEPS)],
+      maxOutputTokens: generationOutputTokens(profile),
+      ...samplingFor(profile),
+      abortSignal: AbortSignal.timeout(TOOL_LOOP_MAX_DURATION_MS),
+      timeout: { totalMs: TOOL_LOOP_MAX_DURATION_MS },
+    });
+  } catch (error) {
+    if (isTimeoutError(error)) throw timeoutDocumentError();
+    throw error;
+  }
+  const state = getAgentRunState(runContext);
+  const textReply = clampReply(run.text.trim());
+  if (!state.commitRequested) {
+    // commit されていない実行の operations は採用しない。
+    return {
+      reply: textReply || "変更を適用できませんでした。依頼を具体的にしてください。",
+      operations: [],
+      questions: [],
+      compacted: context.compacted,
+    };
+  }
+  const reply = clampReply(state.reply ?? textReply);
+  return {
+    reply,
+    operations: state.operations,
+    questions: [],
+    compacted: context.compacted,
+    reviewedDeck: state.workingDeck ?? undefined,
+    policy: state.policy ?? undefined,
+  };
 }
 
 export async function testModelConnection(modelId: string): Promise<{ reply: string; visionSupported: boolean }> {
