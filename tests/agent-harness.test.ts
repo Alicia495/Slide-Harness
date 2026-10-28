@@ -31,6 +31,7 @@ import {
   isToolLoopEnabled,
   renderSlide,
   reflowSlide,
+  writeDeck,
   writeSlide,
   type ElementPatch,
   type InspectionDeps,
@@ -449,6 +450,7 @@ const TOOL_LOOP_TOOL_NAMES = [
   "get_slide",
   "edit_elements",
   "write_slide",
+  "write_deck",
   "render_slide",
   "inspect_layout",
   "inspect_visual",
@@ -502,7 +504,7 @@ function toolLoopFixture(): {
 }
 
 describe("tool registry", () => {
-  it("registers exactly the nine planned tools with inputSchema and execute", () => {
+  it("registers exactly the ten planned tools with inputSchema and execute", () => {
     const { registry } = toolLoopFixture();
     expect(Object.keys(registry).sort()).toEqual([...TOOL_LOOP_TOOL_NAMES].sort());
     for (const name of TOOL_LOOP_TOOL_NAMES) {
@@ -587,6 +589,58 @@ describe("commit_changes", () => {
     });
     await executeAgentTool(f.registry, "commit_changes", { reply: "整えました" });
     expect(getAgentRunState(f.context).policy).toBe<PolicyDecision>("proposal");
+  });
+});
+
+describe("write_deck", () => {
+  it("writes the whole deck through a single replaceDeck operation and records the change kind", () => {
+    const workingCopy = createWorkingCopy(emptyDeck("新規資料"), 0);
+    const result = writeDeck(workingCopy, {
+      title: "新規提案",
+      slides: [
+        { layout: "title", title: "新規提案", subtitle: "2026年" },
+        { layout: "bullets", title: "課題", bullets: ["現状を整理"] },
+      ],
+    });
+    expect(result.operations).toHaveLength(1);
+    expect(result.operations[0]?.type).toBe("replaceDeck");
+    expect(result.deck.title).toBe("新規提案");
+    expect(result.deck.slides).toHaveLength(2);
+    expect(result.changeKinds).toEqual(["replaceDeck"]);
+    expect(workingCopy.operations).toHaveLength(1);
+  });
+
+  it("rejects an empty slide list", () => {
+    const workingCopy = createWorkingCopy(emptyDeck("新規資料"), 0);
+    expect(() => writeDeck(workingCopy, { title: "資料", slides: [] })).toThrow(DocumentError);
+  });
+
+  it("executes write_deck on an empty working copy and commits the new deck as a proposal", async () => {
+    const workingCopy = createWorkingCopy(emptyDeck("新規資料"), 0);
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy();
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn });
+    const { events, onToolEvent } = makeToolEventRecorder();
+    const context = makeToolLoopContext(workingCopy, runtime, onToolEvent);
+    const registry = createAgentToolRegistry(context) as Record<string, { inputSchema: unknown; execute: unknown }>;
+    const summary = await executeAgentTool(registry, "get_deck_summary", {}) as { slides: unknown[] };
+    expect(summary.slides).toHaveLength(0);
+    await executeAgentTool(registry, "write_deck", { title: "新規提案", slides: [{ layout: "title", title: "表紙" }] });
+    const commit = await executeAgentTool(registry, "commit_changes", { reply: "新規作成しました" }) as { policy: string };
+    expect(commit.policy).toBe("proposal");
+    const state = finalizeAgentRunState(context);
+    expect(state.operations).toHaveLength(1);
+    expect(state.operations[0]?.type).toBe("replaceDeck");
+    expect(state.policy).toBe<PolicyDecision>("proposal");
+    expect(state.workingDeck?.slides).toHaveLength(1);
+    const commitEvent = events.find((event) => event.status === "complete" && event.tool === "commit_changes");
+    expect(commitEvent).toMatchObject({ operationCount: 1, policy: "proposal" });
+  });
+
+  it("rejects invalid write_deck input through the registered schema", async () => {
+    const f = toolLoopFixture();
+    await expect(executeAgentTool(f.registry, "write_deck", { title: "", slides: [{ layout: "title", title: "x" }] })).rejects.toThrow();
+    await expect(executeAgentTool(f.registry, "write_deck", { title: "資料", slides: [] })).rejects.toThrow();
   });
 });
 
