@@ -426,6 +426,20 @@ export async function generateOperations(projectId: string, deck: Deck, request:
 
 export const TOOL_LOOP_MAX_STEPS = 10;
 export const TOOL_LOOP_MAX_DURATION_MS = 900000;
+export const TOOL_LOOP_MAX_TOTAL_TOKENS = 120000;
+const TOOL_LOOP_DEFAULT_CONTEXT_TOKENS = 32768;
+
+type TokenUsageStep = { usage: { totalTokens: number | undefined } };
+
+export function toolLoopTokenBudget(profile: ModelConfig): number {
+  const contextWindow = profile.contextWindow ?? TOOL_LOOP_DEFAULT_CONTEXT_TOKENS;
+  return Math.min(TOOL_LOOP_MAX_TOTAL_TOKENS, contextWindow * 2);
+}
+
+export function tokenUsageExceedsBudget(steps: readonly TokenUsageStep[], maxTokens: number): boolean {
+  const used = steps.reduce((total, step) => total + (step.usage.totalTokens ?? 0), 0);
+  return used >= maxTokens;
+}
 
 export const TOOL_LOOP_SYSTEM_PROMPT = `Read first, then edit. You change a PowerPoint presentation only by calling the supplied tools.
 You never write JavaScript, Markdown, shell commands, SQL, file paths, or any other executable code, and you never ask a runtime to execute code for you.
@@ -513,6 +527,7 @@ export async function generateToolLoopOperations(
   };
   const registry = createAgentToolRegistry(runContext);
   const tools = getAgentToolSet(registry);
+  const tokenBudget = toolLoopTokenBudget(profile);
   const brief = toolLoopDeckBrief(deck, target);
   const fixedPrompt = `${TOOL_LOOP_SYSTEM_PROMPT}\nDeck overview (use the read tools for details): ${brief}`;
   const pending = { id: crypto.randomUUID(), role: "user" as const, content: request,
@@ -537,7 +552,11 @@ export async function generateToolLoopOperations(
       system: fixedPrompt,
       prompt,
       tools,
-      stopWhen: [hasToolCall("commit_changes"), stepCountIs(TOOL_LOOP_MAX_STEPS)],
+      stopWhen: [
+        hasToolCall("commit_changes"),
+        stepCountIs(TOOL_LOOP_MAX_STEPS),
+        ({ steps }) => tokenUsageExceedsBudget(steps, tokenBudget),
+      ],
       maxOutputTokens: generationOutputTokens(profile),
       ...samplingFor(profile),
       abortSignal: AbortSignal.timeout(TOOL_LOOP_MAX_DURATION_MS),
@@ -548,11 +567,16 @@ export async function generateToolLoopOperations(
     throw error;
   }
   const state = getAgentRunState(runContext);
+  const totalTokens = run.usage.totalTokens ?? 0;
+  console.log(`[ai] toolLoop finishReason=${run.finishReason} committed=${state.commitRequested} steps=${run.steps.length} totalTokens=${totalTokens} tokenBudget=${tokenBudget}`);
   const textReply = clampReply(run.text.trim());
   if (!state.commitRequested) {
     // commit されていない実行の operations は採用しない。
+    const exhausted = tokenUsageExceedsBudget(run.steps, tokenBudget);
     return {
-      reply: textReply || "変更を適用できませんでした。依頼を具体的にしてください。",
+      reply: textReply || (exhausted
+        ? "AI の実行が token 予算に達したため、変更を適用しませんでした。対象を絞って再試行してください。"
+        : "変更を適用できませんでした。依頼を具体的にしてください。"),
       operations: [],
       questions: [],
       compacted: context.compacted,
