@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowUp, ArrowUpToLine, Check, ChevronDown, CircleAlert, CircleCheck, Download, Eye, FilePlus2, History, ImagePlus, Layers3, LayoutTemplate, ListChecks, Loader2, MessageSquare, Plus, RotateCcw, RotateCw, Send, Settings2, Shapes, Smile, Sparkles, Trash2, X } from "lucide-react";
 import { slideTitle, type Deck, type Element, type Operation, type ShapeType, type Slide, type Theme } from "@/lib/document";
 import type { ModelProfile } from "@/lib/ai";
@@ -102,6 +102,17 @@ function relativeTime(value: string) {
   return new Date(value).toLocaleString("ja-JP", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function phaseLabel(status: { phase: string; attempt?: number } | null, mode: "plan" | "build"): string {
+  switch (status?.phase) {
+    case "context": return "会話の記憶を整理しています…";
+    case "generating": return mode === "plan" ? "構成案を作成しています…" : (status && status.attempt && status.attempt > 1 ? "AI の応答を組み直しています…" : "スライドの内容を生成しています…");
+    case "repair": return mode === "plan" ? "構成案を再検証しています…" : "生成結果を再検証しています…";
+    case "vision": return `AI が画像で意図一致を自己チェックしています…${status && status.attempt && status.attempt > 1 ? `(${status.attempt - 1} 回目以降の再確認)` : ""}`;
+    case "rendering": return "出力プレビューを描画しています…";
+    default: return "考えています…";
+  }
+}
+
 function elementColor(el: Element): string | undefined {
   if (el.kind === "shape") return el.fill;
   if (el.kind === "text" || el.kind === "icon") return el.color;
@@ -147,6 +158,11 @@ export function Editor({ projectId }: { projectId: string }) {
   const chatAbort = useRef<AbortController | null>(null);
   const [retryOps, setRetryOps] = useState<Operation[] | null>(null);
   const [isNarrow, setIsNarrow] = useState(false);
+  const [chatStatus, setChatStatus] = useState<{ phase: string; attempt?: number } | null>(null);
+  const [chatElapsed, setChatElapsed] = useState(0);
+  const [proposalPreview, setProposalPreview] = useState<{ id: string; slides: string[] } | null>(null);
+  const [chatWidth, setChatWidth] = useState(348);
+  const chatWidthRef = useRef(348);
 
   const load = useCallback(async (initial = false) => {
     const data = await jsonRequest<ProjectPayload>(`/api/projects/${projectId}`);
@@ -178,12 +194,56 @@ export function Editor({ projectId }: { projectId: string }) {
   }, [modelId, projectId]);
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages, busy]);
   useEffect(() => {
+    if (!busy) return;
+    setChatElapsed(0);
+    const timer = window.setInterval(() => setChatElapsed((n) => n + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
+  useEffect(() => {
     const query = window.matchMedia("(max-width: 960px)");
     const sync = (event: MediaQueryListEvent) => setIsNarrow(event.matches);
     setIsNarrow(query.matches);
     query.addEventListener("change", sync);
     return () => query.removeEventListener("change", sync);
   }, []);
+  useEffect(() => {
+    try {
+      const saved = Number(window.localStorage.getItem("slide-harness:chatWidth"));
+      if (Number.isFinite(saved) && saved >= 280 && saved <= 640) { chatWidthRef.current = saved; setChatWidth(saved); }
+    } catch { /* プライベートモード等では無視 */ }
+  }, []);
+
+  function startChatResize(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = chatWidthRef.current;
+    const onMove = (moveEvent: PointerEvent) => {
+      const width = Math.min(640, Math.max(280, startWidth - (moveEvent.clientX - startX)));
+      chatWidthRef.current = width;
+      setChatWidth(width);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.classList.remove("chat-resizing");
+      try { window.localStorage.setItem("slide-harness:chatWidth", String(chatWidthRef.current)); } catch { /* 無視 */ }
+    };
+    document.body.classList.add("chat-resizing");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  async function clearChat() {
+    if (!project || busy) return;
+    if (!window.confirm("チャット履歴をすべて削除します。よろしいですか？")) return;
+    setBusy(true); setError("");
+    try {
+      await post(`/api/projects/${projectId}/chat/clear`, {});
+      setNotice("チャット履歴をクリアしました。");
+      await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "チャット履歴をクリアできませんでした。"); }
+    finally { setBusy(false); }
+  }
 
   const displayDeck: Deck | null = proposal && previewProposal ? proposal.proposedDeck : project?.deck ?? null;
   const selectedSlide: Slide | undefined = displayDeck?.slides.find((s) => s.id === selectedSlideId) ?? displayDeck?.slides[0];
@@ -221,25 +281,61 @@ export function Editor({ projectId }: { projectId: string }) {
     if (!project || !prompt.trim() || !modelId || busy || proposal || commitInFlight.current) return;
     const message = prompt.trim();
     const previousVersion = project.version;
-    setBusy(true); setError(""); setNotice(""); setPrompt("");
+    // 非 secure origin(http の IP アクセス)でも動くよう crypto.randomUUID は使わない。
+    const pendingId = `pending-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    // 送信内容をサーバー完了を待たず即座にチャット欄へ表示する(楽観表示)。
+    setMessages((prev) => [...prev, { id: pendingId, role: "user" as const, content: message, metadata: { pending: true }, createdAt: new Date().toISOString() }]);
+    setBusy(true); setChatStatus({ phase: "sending" }); setError(""); setNotice(""); setPrompt("");
     const controller = new AbortController();
     chatAbort.current = controller;
+    const removePending = () => setMessages((prev) => prev.filter((item) => item.id !== pendingId));
     try {
-      const result = await jsonRequest<{ mode: "applied" | "proposal" | "plan" | "chat"; project?: ProjectRecord; proposal?: Proposal; compacted?: boolean }>(`/api/projects/${projectId}/chat`, {
+      const response = await fetch(`/api/projects/${projectId}/chat`, {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
         body: JSON.stringify({
           baseVersion: previousVersion, prompt: message, modelId, mode: chatMode,
           target: chatMode === "build" && currentSlide ? { slideId: currentSlide.id, elementId: selectedElement?.id } : undefined,
         }),
       });
-      if (result.mode === "applied") {
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new ApiError((data as { error?: string }).error || "通信に失敗しました。", response.status);
+      }
+      if (!response.body) throw new ApiError("応答を取得できませんでした。", 502);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result: Record<string, unknown> | null = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const evt = JSON.parse(line) as Record<string, unknown>;
+          if (evt.type === "phase") setChatStatus({ phase: String(evt.phase), attempt: typeof evt.attempt === "number" ? evt.attempt : undefined });
+          else if (evt.type === "result") result = evt;
+          else if (evt.type === "error") throw new ApiError(String(evt.error || "AI 処理に失敗しました。"), Number(evt.status || 500));
+        }
+      }
+      if (!result) throw new ApiError("AI 応答が途中で終了しました。時間をおいて再試行してください。", 502);
+      const mode = result.mode as "applied" | "proposal" | "plan" | "chat";
+      if (mode === "applied") {
         setUndoTargets((items) => [...items, previousVersion]); setRedoTargets([]);
         setNotice(result.compacted ? "会話の記憶を整理し、AI の修正を反映しました。" : "AI の修正を反映しました。元に戻すこともできます。");
-      } else if (result.mode === "proposal") { setPreviewProposal(true); setNotice(result.compacted ? "会話の記憶を整理しました。変更案を確認してください。" : "変更案を確認してください。"); }
-      else if (result.mode === "plan") { setChatOpen(true); setNotice("構成案を作成しました。内容を確認して「計画として採用」を押してください。"); }
-      else setNotice("AI が回答しました。");
+      } else if (mode === "proposal") {
+        const slides = Array.isArray(result.previewSlides) ? result.previewSlides as string[] : [];
+        setProposalPreview({ id: (result.proposal as Proposal).id, slides });
+        setPreviewProposal(true);
+        setNotice(slides.length ? "変更案を作成しました。出力プレビュー画像で意図どおりかを確認してから適用してください。" : "変更案を確認してください。");
+      }
+      else if (mode === "plan") { setChatOpen(true); setNotice(Array.isArray(result.questions) && (result.questions as string[]).length ? "AI から資料について確認の質問が届きました。入力欄に回答してください。" : "構成案を作成しました。内容を確認して「計画として採用」を押してください。"); }
+      else setNotice(Array.isArray(result.questions) && (result.questions as string[]).length ? "AI から質問・提案が届きました。入力欄に回答するとそのまま作成を進めます。" : "AI が回答しました。");
       await load();
     } catch (reason) {
+      removePending();
       if (controller.signal.aborted) {
         // キャンセルは通常のエラーとして扱わない。
         setPrompt(message);
@@ -250,7 +346,7 @@ export function Editor({ projectId }: { projectId: string }) {
         if (reason instanceof ApiError && reason.status === 409) setNotice("他の変更が先に保存されたため、最新の状態を読み込みました。");
         await load().catch(() => undefined);
       }
-    } finally { setBusy(false); chatAbort.current = null; }
+    } finally { setBusy(false); setChatStatus(null); chatAbort.current = null; }
   }
 
   function cancelChat() {
@@ -265,6 +361,7 @@ export function Editor({ projectId }: { projectId: string }) {
       if (accept) { setUndoTargets((items) => [...items, project.version]); setRedoTargets([]); setNotice("変更案を適用しました。"); }
       else setNotice("変更案を破棄しました。");
       setPreviewProposal(false);
+      setProposalPreview(null);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "変更案を処理できませんでした。");
@@ -314,6 +411,21 @@ export function Editor({ projectId }: { projectId: string }) {
       setRenderedSlides(result.slides); setRenderPage(0); setShowOutputPreview(true);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "出力プレビューを生成できませんでした。"); }
     finally { setRendering(false); }
+  }
+
+  async function renderProposalPreview() {
+    if (!proposal || rendering) return;
+    setRendering(true); setError("");
+    try {
+      const result = await post<{ slides: string[] }>(`/api/projects/${projectId}/proposals/${proposal.id}/render`, {});
+      setProposalPreview({ id: proposal.id, slides: result.slides });
+      setRenderedSlides(result.slides); setRenderPage(0); setShowOutputPreview(true);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "変更案のプレビューを生成できませんでした。"); }
+    finally { setRendering(false); }
+  }
+
+  function openProposalPreview(slides: string[], page: number) {
+    setRenderedSlides(slides); setRenderPage(page); setShowOutputPreview(true);
   }
 
   async function upload(file: File) {
@@ -503,7 +615,7 @@ export function Editor({ projectId }: { projectId: string }) {
       </div>
     </header>
 
-    <div className="editor-body">
+    <div className="editor-body" style={{ "--chat-w": `${chatWidth}px` } as CSSProperties}>
       <aside id="slide-sidebar" className={`slide-sidebar ${sidebarOpen ? "mobile-open" : ""}`} inert={isNarrow && !sidebarOpen}>
         <div className="panel-heading"><span>スライド</span><button className="icon-button compact" title="スライドを追加" aria-label="スライドを追加" disabled={!!proposal || busy || saveState === "saving"} onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] } }])}><Plus size={17}/></button></div>
         <div className="slide-list">
@@ -611,20 +723,35 @@ export function Editor({ projectId }: { projectId: string }) {
             <div className="blank-stage"><span className="blank-illustration"><Layers3 size={40}/></span><h2>ここから始めましょう</h2><p>右のチャットに作りたい資料を伝えると、スライドの構成案が表示されます。</p><span className="blank-hint">例：新サービスの提案資料を5枚で作成して</span></div>}
           {!!selectedSlide && <div className="canvas-help">要素を選択して移動 · 角をドラッグしてサイズ変更 · ダブルクリックで文字編集</div>}
         </div>
-        {proposal && <div className="proposal-footer"><div><strong>変更案を確認</strong><p>{proposal.operations.length} 件の変更が含まれます。適用するまで資料は変わりません。</p></div><div><button className="button button-ghost" disabled={busy} onClick={() => void decide(false)}>破棄</button><button className="button button-primary" disabled={busy} onClick={() => void decide(true)}><Check size={17}/>適用する</button></div></div>}
+        {proposal && <div className="proposal-footer">
+          <div className="proposal-footer-info"><strong>変更案を確認</strong><p>{proposal.operations.length} 件の変更が含まれます。出力プレビュー画像で意図どおりかを確認してから適用してください。</p>
+            <div className="proposal-preview">
+              {proposalPreview && proposalPreview.id === proposal.id && proposalPreview.slides.length > 0 ? <>
+                {proposalPreview.slides.map((src, index) => <button key={src} type="button" className="proposal-thumb" title={`${index + 1}枚目を拡大表示`} onClick={() => openProposalPreview(proposalPreview.slides, index)}><img src={src} alt={`変更案プレビュー ${index + 1}枚目`}/><span>{index + 1}</span></button>)}
+                <button type="button" className="text-button proposal-preview-refresh" disabled={rendering} onClick={() => void renderProposalPreview()}>{rendering ? <Loader2 className="spin" size={13}/> : <Eye size={13}/>}再生成</button>
+              </> : <button type="button" className="button button-ghost proposal-preview-generate" disabled={rendering || !proposal.proposedDeck.slides.length} onClick={() => void renderProposalPreview()}>{rendering ? <Loader2 className="spin" size={15}/> : <Eye size={15}/>}出力プレビューを作成</button>}
+            </div>
+          </div>
+          <div><button className="button button-ghost" disabled={busy} onClick={() => void decide(false)}>破棄</button><button className="button button-primary" disabled={busy} onClick={() => void decide(true)}><Check size={17}/>適用する</button></div>
+        </div>}
       </main>
 
       <aside id="chat-panel" className={`chat-panel ${chatOpen ? "mobile-open" : ""}`} aria-label="AI アシスタント" inert={isNarrow && !chatOpen}>
-        <div className="chat-header"><div><span className="chat-icon"><Sparkles size={17}/></span><div><strong>AI アシスタント</strong><small>{chatMode === "plan" ? "構成の相談" : "資料づくりをサポート"}</small></div></div><button className="icon-button compact responsive-toggle" aria-label="チャットを閉じる" title="チャットを閉じる" onClick={() => setChatOpen(false)}><X size={17}/></button></div>
+        <div className="chat-resizer" role="separator" aria-orientation="vertical" aria-label="チャット幅をドラッグで変更" title="ドラッグで幅を変更" onPointerDown={startChatResize}/>
+        <div className="chat-header"><div><span className="chat-icon"><Sparkles size={17}/></span><div><strong>AI アシスタント</strong><small>{chatMode === "plan" ? "構成の相談" : "資料づくりをサポート"}</small></div></div><div className="chat-header-actions"><button className="icon-button compact" title="チャット履歴をクリア" aria-label="チャット履歴をクリア" disabled={busy || !messages.length} onClick={() => void clearChat()}><Trash2 size={16}/></button><button className="icon-button compact responsive-toggle" aria-label="チャットを閉じる" title="チャットを閉じる" onClick={() => setChatOpen(false)}><X size={17}/></button></div></div>
         <div className="chat-mode-row"><div className="segmented chat-mode-segmented" role="group" aria-label="AI のモード"><button className={chatMode === "plan" ? "active" : ""} aria-pressed={chatMode === "plan"} onClick={() => setChatMode("plan")}><ListChecks size={13}/>計画</button><button className={chatMode === "build" ? "active" : ""} aria-pressed={chatMode === "build"} onClick={() => setChatMode("build")}><Sparkles size={13}/>作成</button></div>{project.plan ? <div className="plan-chip"><LayoutTemplate size={13}/><span>計画採用済み</span><button type="button" title="構成計画を表示" aria-label="構成計画を表示" onClick={() => setShowPlan(true)}>表示</button><button type="button" title="構成計画を解除" aria-label="構成計画を解除" onClick={() => void clearPlan()}><X size={13}/></button></div> : null}</div>
         <div className="model-row"><select aria-label="AI モデル" value={modelId} onChange={(event) => setModelId(event.target.value)}>{models.length ? models.map((model) => <option key={model.id} value={model.id}>{model.label}</option>) : <option value="">AI が未設定です</option>}</select><button title="接続を確認" className="icon-button compact" disabled={!modelId || busy} onClick={testConnection}><CircleCheck size={16}/></button><Link href="/settings/ai" title="AI 設定" className="icon-button compact"><Settings2 size={16}/></Link></div>
         <div className="chat-messages" role="log" aria-live="polite" aria-label="AI との会話">
           {!messages.length && <div className="chat-welcome"><span className="welcome-sparkle"><Sparkles size={24}/></span><h3>どんな資料を作りますか？</h3><p>目的や対象読者を伝えると、スライドの構成から一緒に考えます。</p><div className="prompt-suggestions">{["営業提案を5枚で作成", "企画の概要を分かりやすく整理", "社内報告のスライドを作成"].map((suggestion) => <button key={suggestion} onClick={() => setPrompt(suggestion)}>{suggestion}<span>↗</span></button>)}</div></div>}
-          {messages.map((message) => <div key={message.id} className={`chat-message ${message.role === "user" ? "from-user" : "from-assistant"}`}>
+          {messages.map((message) => <div key={message.id} className={`chat-message ${message.role === "user" ? "from-user" : "from-assistant"}${message.metadata.pending ? " is-pending" : ""}`}>
             {message.role === "assistant" && <span className="message-avatar">{message.metadata.mode === "plan" ? <ListChecks size={13}/> : <Sparkles size={13}/>}</span>}
-            <div className="message-body"><div className="message-text">{message.content}</div>{typeof message.metadata.plan === "string" && <pre className="plan-block">{message.metadata.plan}</pre>}{message.role === "assistant" && message.metadata.mode === "plan" && typeof message.metadata.plan === "string" && <button className="plan-adopt" disabled={busy} onClick={() => void adoptPlan(String(message.metadata.plan))}><Check size={14}/>この構成を計画として採用</button>}{message.role === "assistant" && message.metadata.mode === "applied" && <div className="message-action"><CircleCheck size={14}/>変更を反映しました{typeof message.metadata.previousVersion === "number" && <button className="undo-inline" disabled={busy || !!proposal || project.version === Number(message.metadata.previousVersion)} onClick={() => void restore(Number(message.metadata.previousVersion), "history")}>元に戻す</button>}</div>}{message.role === "assistant" && Array.isArray(message.metadata.summaries) && <ul className="op-summary">{(message.metadata.summaries as string[]).map((summary, index) => <li key={index}>{summary}</li>)}</ul>}{message.role === "assistant" && message.metadata.mode === "proposal" && <div className="message-action"><Sparkles size={14}/>変更案を作成しました</div>}{message.role === "assistant" && message.metadata.mode === "chat" && <div className="message-action"><MessageSquare size={14}/>会話の回答</div>}</div>
+            <div className="message-body"><div className="message-text">{message.content}</div>{message.role === "assistant" && !!message.metadata.plan && typeof message.metadata.plan === "string" && <pre className="plan-block">{message.metadata.plan}</pre>}{message.role === "assistant" && Array.isArray(message.metadata.questions) && (message.metadata.questions as string[]).length > 0 && <div className="question-list">{(message.metadata.questions as string[]).map((question, index) => <button key={index} type="button" className="question-chip" title="クリックすると回答の下書きを入力" onClick={() => setPrompt((old) => old.trim() ? old : `${question}\n`)}>{question}<span>↩</span></button>)}</div>}{message.role === "assistant" && message.metadata.mode === "plan" && typeof message.metadata.plan === "string" && <button className="plan-adopt" disabled={busy} onClick={() => void adoptPlan(String(message.metadata.plan))}><Check size={14}/>この構成を計画として採用</button>}{message.role === "assistant" && message.metadata.mode === "applied" && <div className="message-action"><CircleCheck size={14}/>変更を反映しました{typeof message.metadata.previousVersion === "number" && <button className="undo-inline" disabled={busy || !!proposal || project.version === Number(message.metadata.previousVersion)} onClick={() => void restore(Number(message.metadata.previousVersion), "history")}>元に戻す</button>}<button className="undo-inline" disabled={rendering || !project.deck.slides.length} onClick={() => void previewOutput()}>出力プレビューを表示</button></div>}{message.role === "assistant" && Array.isArray(message.metadata.summaries) && <ul className="op-summary">{(message.metadata.summaries as string[]).map((summary, index) => <li key={index}>{summary}</li>)}</ul>}{message.role === "assistant" && message.metadata.mode === "proposal" && <div className="message-action"><Sparkles size={14}/>変更案を作成しました</div>}{message.role === "assistant" && !!message.metadata.review && <div className="self-review">          {(() => { const r = message.metadata.review as { summary?: string; issues?: string[]; rounds?: number; fixed?: number; meetsIntent?: boolean }; return <>
+            <div className="self-review-head"><Eye size={12}/><strong>AI 自己チェック{typeof r.rounds === "number" ? `(${r.rounds} 回の描画確認)` : ""}</strong><span className={r.meetsIntent === false ? "is-missing" : undefined}>{typeof r.fixed === "number" && r.fixed > 0 ? (r.meetsIntent === false ? `自動で ${r.fixed} 件修正・最終確認で意図不一致と判断` : `自動で ${r.fixed} 件修正し意図どおり確認`) : r.meetsIntent === false ? "意図不一致と判断(修正不能)" : "描画は意図どおりと判断"}</span></div>
+            {!!r.summary && <p className="self-review-summary">{r.summary}</p>}
+            {!!r.issues?.length && <ul className="self-review-issues">{r.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>}
+          </>; })()}</div>}{message.role === "assistant" && message.metadata.mode === "chat" && <div className="message-action"><MessageSquare size={14}/>会話の回答</div>}</div>
           </div>)}
-          {busy && <div className="chat-message from-assistant" role="status"><span className="message-avatar"><Sparkles size={13}/></span><div className="message-body ai-thinking"><Loader2 className="spin" size={16}/>考えています…</div></div>}
+          {busy && <div className="chat-message from-assistant" role="status"><span className="message-avatar"><Sparkles size={13}/></span><div className="message-body ai-thinking"><Loader2 className="spin" size={16}/><span>{phaseLabel(chatStatus, chatMode)}</span>{chatElapsed >= 5 && <span className="chat-elapsed">{chatElapsed}s</span>}</div></div>}
           <div ref={chatEnd}/>
         </div>
         <form className="chat-composer" onSubmit={sendChat}>

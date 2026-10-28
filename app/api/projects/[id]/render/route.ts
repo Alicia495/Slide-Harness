@@ -12,7 +12,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     if (!project) return Response.json({ error: "資料が見つかりません。" }, { status: 404 });
     if (!project.deck.slides.length) return Response.json({ error: "先にスライドを作成してください。" }, { status: 400 });
     const pptx = await buildPptx(project.deck, await assetPathsForProject(id));
-    const slides = await renderSlides(id, project.version, pptx, project.deck.slides.length);
+    const slides = await renderSlides(id, String(project.version), pptx, project.deck.slides.length);
     return Response.json({ version: project.version, slides });
   } catch (error) { return apiError(error); }
 }

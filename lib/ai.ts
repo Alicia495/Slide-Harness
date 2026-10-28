@@ -43,6 +43,9 @@ function samplingFor(profile: ModelConfig) {
   return { temperature: profile.temperature, topP: profile.topP };
 }
 
+export type AIPhase = "context" | "generating" | "repair" | "vision" | "rendering";
+export type PhaseReporter = (phase: AIPhase, detail?: { attempt?: number }) => void;
+
 export const REPLY_MAX = 2400;
 export const GENERATE_TIMEOUT_MS = 600000;
 export const VISION_TIMEOUT_MS = 300000;
@@ -51,6 +54,7 @@ export const REPAIR_ATTEMPTS = 5;
 const OutputSchema = z.object({
   reply: z.string().max(REPLY_MAX).default("変更案を作成しました。"),
   operations: z.array(OperationSchema).min(0).max(30),
+  questions: z.array(z.string().trim().min(3).max(200)).max(3).default([]),
 });
 export type AIResult = z.infer<typeof OutputSchema>;
 
@@ -109,7 +113,7 @@ export function planRepairFeedback(error: unknown): string {
   return [
     "Your previous reply failed validation. Repair it and return the complete corrected JSON object only.",
     ...validationLines(error),
-    'Rules: return ONLY {"reply":"...","plan":"..."} with the four required headings, no operations, no coordinates, no ids.',
+    'Rules: return ONLY {"reply":"...","plan":"..."} with the four required headings, no operations, no coordinates, no ids, OR ONLY {"reply":"...","questions":["short question",...]} with 1-3 questions when you need to ask the user. Never return both plan and questions.',
   ].join("\n");
 }
 
@@ -123,10 +127,17 @@ export function generationOutputTokens(profile: ModelConfig): number {
 }
 
 const VisionProbeSchema = z.object({ dominantColor: z.string().trim().min(1).max(40) });
-const VisionReviewSchema = z.object({ summary: z.string().max(600).default("視覚レビューを完了しました。"), operations: z.array(OperationSchema).max(30).default([]) });
+const VisionReviewSchema = z.object({
+  summary: z.string().max(600).default("視覚レビューを完了しました。"),
+  meetsIntent: z.preprocess((value) => (typeof value === "string" ? value.trim().toLowerCase() !== "false" : value), z.boolean().default(true)),
+  issues: z.array(z.string().trim().max(400)).max(8).default([]),
+  operations: z.array(OperationSchema).max(30).default([]),
+});
 const VISION_PROBE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9J4OsAAAAASUVORK5CYII=", "base64");
-const VISION_REVIEW_LIMIT = 2;
+const VISION_REVIEW_LIMIT = 3;
 const VISION_MAX_OUTPUT_TOKENS = 65536;
+
+export type DeckReviewReport = { summary: string; issues: string[]; rounds: number; fixed: number; meetsIntent: boolean };
 
 export function parseVisionProbe(raw: string): boolean {
   try {
@@ -184,13 +195,24 @@ async function parseVisionReview(text: string, deck: Deck, model: LanguageModel,
   let issue = "";
   let repair = "";
   let current = text;
+  let previous = "";
   for (let attempt = 0; attempt < REPAIR_ATTEMPTS; attempt++) {
     try {
-      return VisionReviewSchema.parse(extractJSON(current));
+      // Vision レビューは改善提案層のため、個別の不正操作は件単位で破棄し有効な修正だけ採用する。
+      const raw = extractJSON(current) as Record<string, unknown>;
+      const supplied = Array.isArray(raw.operations) ? raw.operations : [];
+      const valid = supplied.filter((operation) => OperationSchema.safeParse(operation).success);
+      if (valid.length < supplied.length) console.warn(`[ai] Vision レビューの不正操作を破棄 discarded=${supplied.length - valid.length} modelId=${profile.id}`);
+      const parsed = VisionReviewSchema.parse({ ...raw, operations: valid });
+      if (!parsed.meetsIntent && !parsed.operations.length) throw new Error('meetsIntent false requires at least one fixing operation. Set meetsIntent true with issues only, OR return operations that fix the listed issues.');
+      return parsed;
     } catch (error) {
       issue = error instanceof Error ? error.message.slice(0, 600) : "unknown validation error";
+      const stalled = normalizeReply(current) === normalizeReply(previous);
+      previous = current;
       repair = repairFeedback(error, deck);
       console.warn(`[ai] Vision レビュー検証失敗をモデルへ返して修復 attempt=${attempt + 1}/${REPAIR_ATTEMPTS} modelId=${profile.id} issue=${issue}`);
+      if (stalled) break;
       // 修復は画像を再送せず、前応答と ID 一覧のみのテキストで行う。
       current = await requestText(model, profile, `${instruction}\n\nYour previous reply:\n${current.slice(0, REPLY_MAX)}\n\n${repair}`);
     }
@@ -199,17 +221,36 @@ async function parseVisionReview(text: string, deck: Deck, model: LanguageModel,
   throw new DocumentError("AI の視覚レビューを検証できませんでした。時間をおいて再試行するか、依頼を短くしてください。", 502);
 }
 
-async function reviewDeck(projectId: string, deck: Deck, model: LanguageModel, profile: ModelConfig): Promise<Deck> {
+async function reviewDeck(projectId: string, deck: Deck, model: LanguageModel, profile: ModelConfig, request: string, plan: string | null, onPhase?: PhaseReporter): Promise<{ deck: Deck; report: DeckReviewReport }> {
   let reviewed = deck;
+  let fixed = 0;
+  let lastSummary = "";
+  let lastIssues: string[] = [];
+  let lastMeets = true;
+  let rounds = 0;
   for (let attempt = 0; attempt < VISION_REVIEW_LIMIT; attempt++) {
+    onPhase?.("rendering", { attempt: attempt + 1 });
     const pptx = await buildPptx(reviewed, await assetPathsForProject(projectId));
     const images = await renderPptxPreview(pptx);
-    const instruction = `You review rendered PowerPoint slides. Return ONLY one JSON object: {"summary":"short Japanese explanation","operations":[...]}. Inspect every supplied slide image for text overflow, overlap, clipping, weak contrast, inconsistent alignment, excessive text, insufficient visual structure, and chart/table readability. Return only operations that materially improve the deck; use [] if no correction is needed. Every operation must use an exact UUID from this document context. Current document: ${deckContext(reviewed)}`;
+    onPhase?.("vision", { attempt: attempt + 1 });
+    const instruction = [
+      "You review rendered PowerPoint slides against the user's request, as the author of the deck. First verify the rendering fulfills the requested intent: topic, requested slide count, required content, structure, and language. Then inspect every supplied slide image for text overflow, overlap, clipping, weak contrast, inconsistent alignment, excessive text, insufficient visual structure, and chart/table readability.",
+      'Return ONLY one JSON object: {"summary":"short Japanese report of what you saw in the images","meetsIntent":true|false,"issues":["short Japanese issues, empty when none"],"operations":[...]}.',
+      "Set meetsIntent false ONLY together with at least one fixing operation: if you list issues, you must return the operations that fix them. If the issues cannot be fixed with the allowed operations, set meetsIntent true and explain in issues. Use empty operations ONLY when meetsIntent is true and the deck renders cleanly. Every operation must use an exact UUID from this document context.",
+      `User request: ${request.slice(0, REPLY_MAX)}`,
+      plan ? `Approved concept plan (the intent to verify against): ${plan.slice(0, 3000)}` : "No approved plan; verify against the request directly.",
+      `Current document: ${deckContext(reviewed)}`,
+    ].join("\n");
     const result = await parseVisionReview(await requestVision(model, profile, instruction, images), reviewed, model, profile, instruction);
+    rounds = attempt + 1;
+    lastSummary = result.summary;
+    lastMeets = result.meetsIntent;
+    lastIssues = result.meetsIntent && !result.operations.length ? [] : result.issues;
     if (!result.operations.length) break;
     reviewed = applyOperations(reviewed, result.operations);
+    fixed += result.operations.length;
   }
-  return reviewed;
+  return { deck: reviewed, report: { summary: lastSummary, issues: lastIssues, rounds, fixed, meetsIntent: lastMeets } };
 }
 
 export const DECK_CONTEXT_LIMIT = 48000;
@@ -286,10 +327,16 @@ Design guidelines:
 - Use charts only with concrete numeric data from the user or document context. Never invent numbers merely to add a chart; use cards, steps, comparison, or icons instead.
 - When using 'cards', select relevant Lucide icon names (e.g. Shield for security, Zap for speed, Target for goals, Users for teams, Rocket for launch/growth, Clock for time saving).
 - Build custom diagrams with addShape when the content has structure. For process and decision flows, compose flowchart shapes (flowChartTerminator for start/end, flowChartProcess for steps, flowChartDecision for branches, flowChartDocument for data, flowChartConnector for junctions) and connect them with line shapes using arrowHead:"end". Place a short text element on top of each shape as its label. Use callout shapes to highlight key points, star/plus to emphasize highlights, and quadArrow or leftRightArrow to show relationships.
-- For a new deck, create 3-6 varied, visually engaging slides with specific, concise Japanese content.
-- Reply and operations must agree.`;
+ - For a new deck, create 3-6 varied, visually engaging slides with specific, concise Japanese content.
+ - Reply and operations must agree.
 
-export async function generateOperations(projectId: string, deck: Deck, request: string, modelId: string, target?: { slideId?: string; elementId?: string }, plan?: string | null): Promise<AIResult & { compacted?: boolean; reviewedDeck?: Deck }> {
+Proactive proposal rule:
+ - Do not silently invent unspecified user requirements. When the request leaves meaningful choices open (target audience, tone, length, visual style, content emphasis, naming, data), return {"reply":"short Japanese comment","questions":["1-3 concrete Japanese proposals or questions, each offering 2-3 options","..."],"operations":[]} and change nothing.
+ - Propose options in the questions instead of deciding alone, e.g. "色はテーマ基調の青と緑のどちらがよいですか?".
+ - Ask only for choices that materially change the deck; never ask when the request is already clear.
+ - When the user answers, confirms, says "おまかせ", "作成して", "その場で", or clearly authorizes proceeding, generate the deck immediately with sensible defaults and state those assumptions in the reply. Do not ask again.`;
+
+export async function generateOperations(projectId: string, deck: Deck, request: string, modelId: string, target?: { slideId?: string; elementId?: string }, plan?: string | null, onPhase?: PhaseReporter): Promise<AIResult & { compacted?: boolean; reviewedDeck?: Deck; review?: DeckReviewReport }> {
   const profile = await getModel(modelId);
   if (!profile) throw new DocumentError("AI モデルを選択してください。");
   if (profile.provider === "demo") throw new DocumentError("Vision 対応を確認したモデルを選択してください。");
@@ -298,6 +345,7 @@ export async function generateOperations(projectId: string, deck: Deck, request:
   const fixedPrompt = `${SYSTEM_PROMPT}\nSelected target: ${JSON.stringify(target ?? {})}\nCurrent document: ${deckContext(deck)}`;
   const pending = { id: crypto.randomUUID(), role: "user" as const, content: request,
     metadata: { modelId, target }, createdAt: new Date().toISOString() };
+  onPhase?.("context");
   const context = await prepareConversationContext(projectId, profile, fixedPrompt, async (instruction, maxOutputTokens) => {
     try {
       const result = await generateText({ model, prompt: instruction, maxOutputTokens, ...samplingFor(profile), abortSignal: AbortSignal.timeout(GENERATE_TIMEOUT_MS) });
@@ -313,6 +361,7 @@ export async function generateOperations(projectId: string, deck: Deck, request:
   let repair = "";
   let previous = "";
   for (let attempt = 0; attempt < REPAIR_ATTEMPTS; attempt++) {
+    onPhase?.(attempt === 0 ? "generating" : "repair", { attempt: attempt + 1 });
     let text: string;
     try {
       const result = await generateText({
@@ -328,16 +377,18 @@ export async function generateOperations(projectId: string, deck: Deck, request:
       throw error;
     }
     try {
-      const raw = extractJSON(text) as { reply?: unknown; operations?: unknown };
+      const raw = extractJSON(text) as { reply?: unknown; operations?: unknown; questions?: unknown };
       const parsed = OutputSchema.parse({
         reply: clampReply(typeof raw.reply === "string" ? raw.reply : ""),
         operations: Array.isArray(raw.operations) ? raw.operations : [],
+        questions: Array.isArray(raw.questions) ? raw.questions : [],
       });
       if (!parsed.operations.length && !parsed.reply.trim()) throw new DocumentError("応答が空です。依頼を具体化してください。");
       const generatedDeck = parsed.operations.length ? applyOperations(deck, parsed.operations) : deck;
       if (!parsed.operations.length) return { ...parsed, compacted: context.compacted };
       // ADR-0001: 小修正も含め操作のある生成は必ず Vision レビューを通す。即適用可否は chat route が isSmallAIEdit で判断する。
-      return { ...parsed, compacted: context.compacted, reviewedDeck: await reviewDeck(projectId, generatedDeck, model, profile) };
+      const reviewedResult = await reviewDeck(projectId, generatedDeck, model, profile, request, plan ?? null, onPhase);
+      return { ...parsed, compacted: context.compacted, reviewedDeck: reviewedResult.deck, review: reviewedResult.report };
     } catch (error) {
       if (error instanceof DocumentError && error.status !== 400) throw error;
       issue = error instanceof Error ? error.message.slice(0, 600) : "unknown validation error";
@@ -368,10 +419,11 @@ export async function testModelConnection(modelId: string): Promise<{ reply: str
 }
 
 const PlanOutputSchema = z.object({
-  reply: z.string().max(600).default("構成案を作成しました。"),
-  plan: z.string().min(10).max(3000),
+  reply: z.string().max(600).default(""),
+  plan: z.string().min(10).max(3000).optional(),
+  questions: z.array(z.string().trim().min(3).max(200)).max(3).default([]),
 });
-export type PlanResult = z.infer<typeof PlanOutputSchema>;
+export type PlanResult = { reply: string; plan: string | null; questions: string[] };
 
 export const PLAN_SYSTEM_PROMPT = `You plan a PowerPoint presentation before any slides are created. Return ONLY one JSON object: {"reply":"short Japanese comment on the concept (max 300 chars)","plan":"Japanese concept plan"}.
 Never return JavaScript, Markdown fences, presentation operations, slide element coordinates, colors, or UUIDs.
@@ -383,12 +435,14 @@ The plan must be plain Japanese text with exactly these section headings on thei
 Under ## スライド構成, list numbered slides (3-10), each as "N. 見出し — 一行の要点 — 推奨レイアウト" choosing from title|bullets|twoColumn|cards|steps|kpi|comparison|chart|table|section.
 Under ## テーマとデザイン方針, base the color and font guidance on the theme in the Current document; never invent a new palette.
 When a previous plan exists in the conversation, revise it with the user's feedback instead of starting over, and keep the same headings.
+Do not force a one-shot plan. When the request leaves key choices open (target audience details, tone, style, slide count, color scheme, available data, occasion), first ask 1-3 short Japanese questions instead of writing a plan: return ONLY {"reply":"short Japanese comment (max 300 chars)","questions":["specific Japanese question with concrete options",...]} and NO plan field. Ask only about choices that materially change the deck, and prefer answering from context when the request is already clear.
+When the conversation contains the user's answers to your questions, incorporate them and return the plan with the required headings.
 Keep the whole plan under 1500 Japanese characters.`;
 
 export function buildDemoPlan(deck: Deck, request: string): PlanResult {
   const topic = request.replace(/\s+/g, " ").slice(0, 60) || "新サービスのご提案";
-  const plan = [
-    "## 目的と読者",
+    const plan = [
+      "## 目的と読者",
     `${topic}を意思決定者に伝え、次ステップへの合意を得る。`,
     "## コンセプト",
     "課題提示から価値・プロセス・成果の順で、定量表現を交えて納得逐步形成する。",
@@ -402,10 +456,10 @@ export function buildDemoPlan(deck: Deck, request: string): PlanResult {
     "## テーマとデザイン方針",
     `現テーマ「${deck.theme.name}」の基調色 ${deck.theme.primary} と強調色 ${deck.theme.accent} を使用し、${deck.theme.fontFace} で統一する。`,
   ].join("\n");
-  return { reply: "デモ構成案を作成しました。内容を確認し、「この構成を計画として採用」を押してから作成に進めます。", plan };
+  return { reply: "デモ構成案を作成しました。内容を確認し、「この構成を計画として採用」を押してから作成に進めます。", plan, questions: [] };
 }
 
-export async function generatePlan(projectId: string, deck: Deck, request: string, modelId: string): Promise<PlanResult & { compacted?: boolean }> {
+export async function generatePlan(projectId: string, deck: Deck, request: string, modelId: string, onPhase?: PhaseReporter): Promise<PlanResult & { compacted?: boolean }> {
   const profile = await getModel(modelId);
   if (!profile) throw new DocumentError("AI モデルを選択してください。");
   if (profile.provider === "demo") return buildDemoPlan(deck, request);
@@ -413,6 +467,7 @@ export async function generatePlan(projectId: string, deck: Deck, request: strin
   const fixedPrompt = `${PLAN_SYSTEM_PROMPT}\nCurrent document: ${deckContext(deck)}`;
   const pending = { id: crypto.randomUUID(), role: "user" as const, content: request,
     metadata: { modelId, mode: "plan" }, createdAt: new Date().toISOString() };
+  onPhase?.("context");
   const context = await prepareConversationContext(projectId, profile, fixedPrompt, async (instruction, maxOutputTokens) => {
     try {
       const result = await generateText({ model, prompt: instruction, maxOutputTokens, ...samplingFor(profile), abortSignal: AbortSignal.timeout(GENERATE_TIMEOUT_MS) });
@@ -427,6 +482,7 @@ export async function generatePlan(projectId: string, deck: Deck, request: strin
   let repair = "";
   let previous = "";
   for (let attempt = 0; attempt < REPAIR_ATTEMPTS; attempt++) {
+    onPhase?.(attempt === 0 ? "generating" : "repair", { attempt: attempt + 1 });
     let text: string;
     try {
       const result = await generateText({
@@ -442,12 +498,14 @@ export async function generatePlan(projectId: string, deck: Deck, request: strin
       throw error;
     }
     try {
-      const raw = extractJSON(text) as { reply?: unknown; plan?: unknown };
+      const raw = extractJSON(text) as { reply?: unknown; plan?: unknown; questions?: unknown };
       const parsed = PlanOutputSchema.parse({
         reply: clampReply(typeof raw.reply === "string" ? raw.reply : ""),
-        plan: typeof raw.plan === "string" ? raw.plan.trim() : "",
+        ...(typeof raw.plan === "string" && raw.plan.trim() ? { plan: raw.plan.trim() } : {}),
+        questions: Array.isArray(raw.questions) ? raw.questions : [],
       });
-      return { ...parsed, compacted: context.compacted };
+      if (!parsed.plan && !parsed.questions.length) throw new DocumentError("応答が空です。依頼を具体化してください。");
+      return { reply: parsed.reply || (parsed.plan ? "構成案を作成しました。" : "いくつか確認させてください。"), plan: parsed.plan ?? null, questions: parsed.questions, compacted: context.compacted };
     } catch (error) {
       issue = error instanceof Error ? error.message.slice(0, 600) : "unknown validation error";
       const stalled = normalizeReply(text) === normalizeReply(previous);

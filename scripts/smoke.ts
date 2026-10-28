@@ -8,6 +8,21 @@ async function request<T>(route: string, body?: unknown): Promise<T> {
   if (!response.ok) throw new Error(`${route}: ${JSON.stringify(data)}`);
   return data as T;
 }
+async function chatStream(route: string, body: unknown): Promise<Record<string, unknown>> {
+  const response = await fetch(`${base}${route}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) throw new Error(`${route}: ${JSON.stringify(await response.json())}`);
+  let result: Record<string, unknown> | null = null;
+  const text = await response.text();
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    const evt = JSON.parse(line) as Record<string, unknown>;
+    if (evt.type === "phase") continue;
+    if (evt.type === "error") throw new Error(`${route}: ${String(evt.error)}`);
+    if (evt.type === "result") result = evt;
+  }
+  if (!result) throw new Error(`${route}: result event missing`);
+  return result;
+}
 
 const health = await request<{ status: string }>("/api/health");
 assert.equal(health.status, "ok");
@@ -19,19 +34,19 @@ const invalid = await fetch(`${base}/api/projects/${id}/chat`, { method: "POST",
 assert.equal(invalid.status, 400);
 const afterFailure = await request<{ messages: unknown[] }>(`/api/projects/${id}`);
 assert.equal(afterFailure.messages.length, 0);
-const planChat = await request<{ mode: string; plan: string }>(`/api/projects/${id}/chat`, {
+const planChat = await chatStream(`/api/projects/${id}/chat`, {
   baseVersion: 0, prompt: "社内向けの製品提案を4枚で", modelId: "demo", mode: "plan",
 });
 assert.equal(planChat.mode, "plan");
-assert.ok(planChat.plan.includes("## スライド構成"));
-const planned = await request<{ project: { plan: string | null } }>(`/api/projects/${id}/plan`, { plan: planChat.plan });
+assert.ok(String(planChat.plan).includes("## スライド構成"));
+const planned = await request<{ project: { plan: string | null } }>(`/api/projects/${id}/plan`, { plan: planChat.plan, baseVersion: 0 });
 assert.equal(planned.project.plan, planChat.plan);
 const chatMessages = await request<{ messages: { role: string; metadata: { mode?: string } }[] }>(`/api/projects/${id}`);
 assert.ok(chatMessages.messages.some((message) => message.role === "assistant" && message.metadata.mode === "plan"));
 const buildNeedsVision = await fetch(`${base}/api/projects/${id}/chat`, { method: "POST", headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ baseVersion: 0, prompt: "デモでは作成できない", modelId: "demo" }) });
 assert.equal(buildNeedsVision.status, 400);
-const unplanned = await request<{ project: { plan: string | null } }>(`/api/projects/${id}/plan`, { plan: null });
+const unplanned = await request<{ project: { plan: string | null } }>(`/api/projects/${id}/plan`, { plan: null, baseVersion: 0 });
 assert.equal(unplanned.project.plan, null);
 const replacement = await request<{ project: { version: number; deck: { slides: { id: string; elements: { id: string; kind: string; role?: string; text?: string }[] }[] } } }>(
   `/api/projects/${id}/operations`, {

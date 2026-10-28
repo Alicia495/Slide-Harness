@@ -164,6 +164,12 @@ export async function addMessage(projectId: string, role: ChatMessage["role"], c
     [crypto.randomUUID(), projectId, role === "user" ? LOCAL_USER_ID : null, role, content, JSON.stringify(metadata)],
   );
 }
+export async function clearMessages(projectId: string): Promise<void> {
+  await db().query(
+    `DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id=$1)`,
+    [projectId],
+  );
+}
 
 export type Proposal = { id: string; baseVersion: number; summary: string; operations: Operation[]; proposedDeck: Deck; status: string };
 function mapProposal(row: Record<string, unknown>): Proposal {
@@ -172,6 +178,10 @@ function mapProposal(row: Record<string, unknown>): Proposal {
 }
 export async function getPendingProposal(projectId: string): Promise<Proposal | null> {
   const result = await db().query("SELECT * FROM proposals WHERE project_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1", [projectId]);
+  return result.rows[0] ? mapProposal(result.rows[0]) : null;
+}
+export async function getProposal(projectId: string, proposalId: string): Promise<Proposal | null> {
+  const result = await db().query("SELECT * FROM proposals WHERE id=$1 AND project_id=$2", [proposalId, projectId]);
   return result.rows[0] ? mapProposal(result.rows[0]) : null;
 }
 export async function createProposal(projectId: string, baseVersion: number, operations: Operation[], proposedDeckOverride?: Deck): Promise<Proposal> {
