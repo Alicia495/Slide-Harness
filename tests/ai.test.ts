@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, validationFailureMessage, type ModelConfig } from "../lib/ai";
+import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, toolLoopTokenBudget, tokenUsageExceedsBudget, validationFailureMessage, type ModelConfig } from "../lib/ai";
 import { emptyDeck, type Deck } from "../lib/document";
 import { DocumentError, isSmallAIEdit } from "../lib/operations";
 
@@ -243,5 +243,26 @@ describe("AI generation mode selection", () => {
     const deck = deckWithSlide("表紙");
     expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "false" }, deck)).toBe("legacy");
     expect(selectAIGenerationMode({}, deck)).toBe("legacy");
+  });
+});
+
+describe("Tool loop token budget", () => {
+  it("bounds a run from the model context window and a global ceiling", () => {
+    expect(toolLoopTokenBudget(profileWith(2048, 8192))).toBe(16384);
+    expect(toolLoopTokenBudget(profileWith(2048, null))).toBeGreaterThan(0);
+    expect(toolLoopTokenBudget(profileWith(2048, 1000000))).toBeLessThanOrEqual(120000);
+  });
+
+  it("stops when aggregate step usage reaches the run budget", () => {
+    const steps = [
+      { usage: { totalTokens: 4000 } },
+      { usage: { totalTokens: 5000 } },
+    ];
+    expect(tokenUsageExceedsBudget(steps, 9000)).toBe(true);
+    expect(tokenUsageExceedsBudget(steps, 9001)).toBe(false);
+  });
+
+  it("treats missing provider usage as zero without failing", () => {
+    expect(tokenUsageExceedsBudget([{ usage: { totalTokens: undefined } }], 1)).toBe(false);
   });
 });
