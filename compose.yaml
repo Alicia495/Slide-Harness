@@ -22,6 +22,7 @@ services:
       DATABASE_URL: postgres://slide_harness:${DB_PASSWORD:?DB_PASSWORD is required. Use only characters safe in a URL (A-Z a-z 0-9)}@db:5432/slide_harness
       DATA_DIR: /app/data
       AI_SETTINGS_ENCRYPTION_KEY: ${AI_SETTINGS_ENCRYPTION_KEY:-}
+      AI_TOOL_LOOP_ENABLED: ${AI_TOOL_LOOP_ENABLED:-true}
       AZURE_OPENAI_RESOURCE: ${AZURE_OPENAI_RESOURCE:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
