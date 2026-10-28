@@ -17,7 +17,7 @@ Browser -> Next.js API -> AI provider
 
 ADR-0002 に従い、AI 経路を Resource-Oriented Tool Loop Harness へ移行する。
 
-`AI_TOOL_LOOP_ENABLED=true` かつ既存スライドがある場合に Tool Loop を使用する。フラグ無効時と空 Deck の初回生成は現行の一括操作生成へフォールバックするため、保存形式を変更せず段階的にロールアウトできる。
+`AI_TOOL_LOOP_ENABLED=true` の場合に Tool Loop を使用する。空 Deck の初回生成も `write_deck` で Tool Loop を使い、Deck 全体を提案として提示する。フラグ無効時は現行の一括操作生成へフォールバックするため、保存形式を変更せず段階的にロールアウトできる。
 
 ```text
 Browser
@@ -26,7 +26,7 @@ Browser
       -> Tool Registry
         -> Read:    get_deck_summary / get_slide
         -> Edit:    edit_elements / reflow_slide
-        -> Write:   write_slide
+        -> Write:   write_slide / write_deck
         -> Render:  render_slide
         -> Inspect: inspect_layout / inspect_visual
         -> Commit:  commit_changes
@@ -66,7 +66,7 @@ High-level tool input
   -> Working Copy
 ```
 
-`write_slide` は対象スライド以外と Deck ID を維持する。`reflow_slide` は許可されたレイアウト規則を検証済み Operation へ変換し、モデル生成コードを実行しない。
+`write_slide` は対象スライド以外と Deck ID を維持する。`write_deck` は Blueprint からのみ Deck 全体を構成し、常に提案として提示する。`reflow_slide` は許可されたレイアウト規則を検証済み Operation へ変換し、モデル生成コードを実行しない。
 
 ## Inspection
 

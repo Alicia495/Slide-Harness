@@ -19,7 +19,7 @@
 
 OpenAI 互換モデルへの生成リクエストは `temperature=1.0`、`top_p=0.95`、`top_k=20`、`min_p=0.0`、`presence_penalty=0.0`、`repetition_penalty=1.0` に固定します。会話の圧縮と文書操作では、推論だけで出力枠を使い切るモデルに備えて `enable_thinking=false` も送ります。Tool Loop は思考内容を実行中に返すため `enable_thinking=true` で実行します。Azure OpenAI は対応しないパラメータがあるため、設定画面で Temperature と Top P を指定します。
 
-`AI_TOOL_LOOP_ENABLED=true` の場合、既存資料の AI 編集は `get_deck_summary`、`get_slide`、`edit_elements`、`write_slide`、`render_slide`、`inspect_layout`、`inspect_visual`、`reflow_slide`、`commit_changes` を使う Tool Loop Harness で実行します。AI は必要なスライドだけを読み、隔離された Working Copy を編集・検査してから変更を保存します。実行中はチャット欄にモデルのステップ、思考内容、各ツールの実行進行がリアルタイムで表示されます。空資料の初回生成は従来の構造化操作生成を使います。接続先モデルに native tool calling の対応と十分な指示追従能力が必要です。正常に動作しないモデルでは `AI_TOOL_LOOP_ENABLED=false` にして従来経路へ戻せます。
+`AI_TOOL_LOOP_ENABLED=true` の場合、AI 編集は `get_deck_summary`、`get_slide`、`edit_elements`、`write_slide`、`write_deck`、`render_slide`、`inspect_layout`、`inspect_visual`、`reflow_slide`、`commit_changes` を使う Tool Loop Harness で実行します。AI は必要なスライドだけを読み、隔離された Working Copy を編集・検査してから変更を保存します。空資料の初回生成も Tool Loop を使い、`write_deck` で Deck 全体を作成して提案として提示します。実行中はチャット欄にモデルのステップ、思考内容、各ツールの実行進行がリアルタイムで表示されます。接続先モデルに native tool calling の対応と十分な指示追従能力が必要です。正常に動作しないモデルでは `AI_TOOL_LOOP_ENABLED=false` にして従来経路へ戻せます。従来経路は空資料の初回生成も一括操作生成で扱います。
 
 画面で入力する API キーは AES-256-GCM で暗号化して PostgreSQL に保存します。暗号化キーは `.env` の `AI_SETTINGS_ENCRYPTION_KEY` に32バイトの乱数を Base64 で設定してください。例: `node -p "require('node:crypto').randomBytes(32).toString('base64')"`。この値はバックアップし、変更すると保存済み API キーを復号できなくなります。認証不要のローカル AI なら設定は不要です。
 

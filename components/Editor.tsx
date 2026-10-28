@@ -109,6 +109,7 @@ function toolPhaseLabel(tool?: string): string {
   if (!tool) return "資料を操作しています…";
   if (tool.startsWith("get_")) return "スライドを読み込んでいます…";
   if (tool.startsWith("read_")) return "スライドを読み込んでいます…";
+  if (tool === "write_deck") return "プレゼンを作成しています…";
   if (tool.startsWith("edit_")) return "要素を編集しています…";
   if (tool.startsWith("write_")) return "スライドを書き換えています…";
   if (tool.startsWith("render_")) return "スライドを描画しています…";
