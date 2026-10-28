@@ -386,6 +386,9 @@ export function classifyChanges({ tool, operations }: ChangeClassification): Pol
 
 function applyToWorkingCopy(workingCopy: WorkingCopy, operations: Operation[]): ToolResult {
   if (operations.length === 0) throw new DocumentError("適用する変更がありません。");
+  if (workingCopy.operations.length + operations.length > MAX_WORKING_COPY_OPERATIONS) {
+    throw new DocumentError("1 回の実行で扱える変更操作は 30 件までです。依頼を分割してください。", 429);
+  }
   const deck = applyOperations(workingCopy.deck, operations);
   workingCopy.deck = deck;
   workingCopy.operations.push(...operations);
@@ -505,6 +508,7 @@ export type AgentRunContext = {
 
 export type AgentRunState = {
   commitRequested: boolean;
+  budgetExhausted: boolean;
   operations: Operation[];
   workingDeck: Deck | null;
   policy: PolicyDecision | null;
@@ -522,6 +526,7 @@ export type AgentToolRegistry = Record<string, AgentToolHandle>;
 const COMMIT_REPLY_MAX = 1200;
 const TOOL_PATCH_MAX = 20;
 const TOOL_ELEMENT_IDS_MAX = 24;
+const MAX_WORKING_COPY_OPERATIONS = 30;
 
 const ElementPatchSchema = z.object({
   elementId: z.uuid(),
@@ -564,7 +569,7 @@ export const LayoutIssueSchema = z.object({
 const CommitResultSchema = z.object({
   committed: z.literal(true),
   policy: z.enum(["auto", "proposal"]),
-  operationCount: z.number().int().positive(),
+  operationCount: z.number().int().nonnegative(),
 });
 
 // 入力契約は Zod スキーマのみ。実行前に必ずここで検証する。
@@ -631,6 +636,20 @@ function runRecordOf(context: unknown): RunRecord {
 
 export function getAgentRunState(context: unknown): AgentRunState {
   return runRecordOf(context).state;
+}
+
+export function isAgentBudgetExhausted(context: unknown): boolean {
+  return runRecordOf(context).state.budgetExhausted;
+}
+
+export function finalizeAgentRunState(context: unknown): AgentRunState {
+  const record = runRecordOf(context);
+  if (!record.state.commitRequested) return record.state;
+  const { workingCopy } = record.context;
+  record.state.operations = [...workingCopy.operations];
+  record.state.workingDeck = structuredClone(workingCopy.deck);
+  record.state.policy = commitPolicy(record);
+  return record.state;
 }
 
 export function createAgentRunBudget(options: { maxSteps: number; maxDurationMs: number; now: () => number }): AgentRunBudget {
@@ -701,7 +720,6 @@ const rawToolHandlersByTool: Record<AgentToolName, RawToolHandler> = {
   commit_changes: async (input, record) => {
     const { reply } = toolInputSchemas.commit_changes.parse(input);
     const { workingCopy } = record.context;
-    if (workingCopy.operations.length === 0) throw new DocumentError("コミットする変更がありません。");
     const state = record.state;
     state.commitRequested = true;
     state.reply = reply;
@@ -730,7 +748,7 @@ function summarizeToolResult(toolName: AgentToolName, result: unknown): Record<s
     case "render_slide":
       return { rendered: true, byteLength: Buffer.isBuffer(result) ? result.byteLength : 0 };
     case "inspect_layout":
-      return { issues: LayoutIssueSchema.array().parse(result) };
+      return { issues: LayoutIssueSchema.array().parse(result).slice(0, 20) };
     case "inspect_visual":
       return { insight: VisualInsightSchema.parse(result) };
     case "commit_changes":
@@ -740,17 +758,17 @@ function summarizeToolResult(toolName: AgentToolName, result: unknown): Record<s
 
 async function invokeAgentTool(record: RunRecord, toolName: AgentToolName, input: Record<string, unknown>): Promise<unknown> {
   const { context, state } = record;
-  if (context.budget) {
-    assertAgentTime(context.budget);
-    consumeAgentStep(context.budget);
-  }
   context.onToolEvent?.({ status: "start", tool: toolName });
   try {
+    if (context.budget) consumeAgentStep(context.budget);
     const result = await rawToolHandlersByTool[toolName](input, record);
     if (!state.toolsUsed.includes(toolName)) state.toolsUsed.push(toolName);
     context.onToolEvent?.({ status: "complete", tool: toolName });
     return result;
   } catch (error) {
+    if (error instanceof DocumentError && (error.status === 429 || error.status === 504)) {
+      state.budgetExhausted = true;
+    }
     context.onToolEvent?.({ status: "error", tool: toolName });
     throw error;
   }
@@ -761,7 +779,7 @@ export function createAgentToolRegistry(context: unknown): AgentToolRegistry {
   const validated = AgentRunContextSchema.parse(context);
   const record: RunRecord = {
     context: validated,
-    state: { commitRequested: false, operations: [], workingDeck: null, policy: null, reply: null, toolsUsed: [] },
+    state: { commitRequested: false, budgetExhausted: false, operations: [], workingDeck: null, policy: null, reply: null, toolsUsed: [] },
   };
   runRecords.set(context, record);
   const toolSet: ToolSet = {

@@ -14,9 +14,10 @@ import {
   createAgentToolRegistry,
   createInspectionRuntime,
   createWorkingCopy,
-  getAgentRunState,
+  finalizeAgentRunState,
   getAgentToolSet,
   isToolLoopEnabled,
+  isAgentBudgetExhausted,
   VisualInsightSchema,
   type InspectionDeps,
   type PolicyDecision,
@@ -556,6 +557,7 @@ export async function generateToolLoopOperations(
         hasToolCall("commit_changes"),
         stepCountIs(TOOL_LOOP_MAX_STEPS),
         ({ steps }) => tokenUsageExceedsBudget(steps, tokenBudget),
+        () => isAgentBudgetExhausted(runContext),
       ],
       maxOutputTokens: generationOutputTokens(profile),
       ...samplingFor(profile),
@@ -566,7 +568,7 @@ export async function generateToolLoopOperations(
     if (isTimeoutError(error)) throw timeoutDocumentError();
     throw error;
   }
-  const state = getAgentRunState(runContext);
+  const state = finalizeAgentRunState(runContext);
   const totalTokens = run.usage.totalTokens ?? 0;
   console.log(`[ai] toolLoop finishReason=${run.finishReason} committed=${state.commitRequested} steps=${run.steps.length} totalTokens=${totalTokens} tokenBudget=${tokenBudget}`);
   const textReply = clampReply(run.text.trim());
