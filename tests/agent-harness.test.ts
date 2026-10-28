@@ -593,7 +593,7 @@ describe("commit_changes", () => {
 });
 
 describe("write_deck", () => {
-  it("writes the whole deck through a single replaceDeck operation and records the change kind", () => {
+  it("writes the whole deck through typed operations with explicit slide ids that replay deterministically", () => {
     const workingCopy = createWorkingCopy(emptyDeck("新規資料"), 0);
     const result = writeDeck(workingCopy, {
       title: "新規提案",
@@ -603,11 +603,17 @@ describe("write_deck", () => {
       ],
     });
     expect(result.operations).toHaveLength(1);
-    expect(result.operations[0]?.type).toBe("replaceDeck");
+    const [operation] = result.operations;
+    expect(operation?.type).toBe("replaceDeckSlides");
+    expect(operation && "slides" in operation ? operation.slides.length : 0).toBe(2);
     expect(result.deck.title).toBe("新規提案");
     expect(result.deck.slides).toHaveLength(2);
-    expect(result.changeKinds).toEqual(["replaceDeck"]);
+    expect(result.changeKinds).toEqual(["replaceDeckSlides"]);
     expect(workingCopy.operations).toHaveLength(1);
+    // 操作ログの再適用が Working Copy と完全一致し、保存時の検証を必ず通る。
+    const replayed = applyOperations(emptyDeck("新規資料"), result.operations);
+    expect(replayed).toEqual(result.deck);
+    expect(applyOperations(emptyDeck("新規資料"), result.operations)).toEqual(result.deck);
   });
 
   it("rejects an empty slide list", () => {
@@ -630,7 +636,7 @@ describe("write_deck", () => {
     expect(commit.policy).toBe("proposal");
     const state = finalizeAgentRunState(context);
     expect(state.operations).toHaveLength(1);
-    expect(state.operations[0]?.type).toBe("replaceDeck");
+    expect(state.operations[0]?.type).toBe("replaceDeckSlides");
     expect(state.policy).toBe<PolicyDecision>("proposal");
     expect(state.workingDeck?.slides).toHaveLength(1);
     const commitEvent = events.find((event) => event.status === "complete" && event.tool === "commit_changes");
