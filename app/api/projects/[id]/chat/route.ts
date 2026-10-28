@@ -1,9 +1,10 @@
 import { z } from "zod";
-import { generateOperations, generatePlan, type PhaseReporter } from "@/lib/ai";
+import { generateOperations, generatePlan, generateToolLoopOperations, selectAIGenerationMode, type PhaseReporter } from "@/lib/ai";
 import { assetPathsForProject } from "@/lib/assets";
+import { buildAIPersistenceDecision } from "@/lib/chat-policy";
 import { getModel } from "@/lib/model-settings";
 import { apiError, requireUuid } from "@/lib/http";
-import { DocumentError, isSmallAIEdit, operationSummaries } from "@/lib/operations";
+import { DocumentError, decideAIChangeMode, isReplayableToolLoopResult, operationSummaries } from "@/lib/operations";
 import { addMessage, commitOperations, createProposal, getPendingProposal, getProject } from "@/lib/projects";
 import { buildPptx } from "@/lib/pptx";
 import { renderProposalSlides } from "@/lib/render";
@@ -46,22 +47,31 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           write({ type: "result", mode: "plan", reply: plan.reply, plan: plan.plan, questions: plan.questions, compacted: !!plan.compacted });
           return;
         }
-        const generated = await generateOperations(id, project.deck, body.prompt, body.modelId, body.target, project.plan, onPhase);
-        if (!generated.operations.length) {
+        const generationMode = selectAIGenerationMode(process.env, project.deck);
+        const generated = generationMode === "tool-loop"
+          ? await generateToolLoopOperations(id, project.deck, body.baseVersion, body.prompt, body.modelId, body.target, project.plan, onPhase)
+          : await generateOperations(id, project.deck, body.prompt, body.modelId, body.target, project.plan, onPhase);
+        const reviewedDeck = generated.reviewedDeck ?? null;
+        // 再適用判定は tool-loop のみ。legacy は現行どおり reviewedDeck override で保存する。
+        const replayable = generationMode === "legacy" || isReplayableToolLoopResult(project.deck, generated.operations, reviewedDeck);
+        const decision = buildAIPersistenceDecision({ mode: generationMode, operations: generated.operations, replayable, reviewedDeck });
+        if (decision.kind === "chat") {
           await addMessage(id, "user", body.prompt, { modelId: body.modelId, target: body.target });
           await addMessage(id, "assistant", generated.reply, { mode: "chat", questions: generated.questions });
           write({ type: "result", mode: "chat", reply: generated.reply, questions: generated.questions, compacted: !!generated.compacted });
           return;
         }
-        if (isSmallAIEdit(generated.operations)) {
-          // 単一要素の小修正は Vision レビュー済み Deck を提案にせず即時コミットする(ADR-0001)。
-          const updated = await commitOperations(id, body.baseVersion, generated.operations, "ai", generated.reviewedDeck);
+        const changeMode = decideAIChangeMode(generated.operations, generationMode === "tool-loop" ? generated.policy : undefined);
+        if (changeMode === "applied") {
+          // 小修正は Vision レビュー済み Deck を提案にせず即時コミットする(ADR-0001)。tool-loop は操作の再適用で Deck と操作ログを一致させる。
+          const updated = await commitOperations(id, body.baseVersion, generated.operations, "ai", decision.deckOverride);
           await addMessage(id, "user", body.prompt, { modelId: body.modelId, target: body.target });
           await addMessage(id, "assistant", generated.reply, { mode: "applied", version: updated.version, previousVersion: body.baseVersion, summaries: operationSummaries(generated.operations), review: generated.review });
           write({ type: "result", mode: "applied", reply: generated.reply, project: updated, review: generated.review, compacted: !!generated.compacted });
           return;
         }
-        const proposal = await createProposal(id, body.baseVersion, generated.operations, generated.reviewedDeck);
+        // tool-loop は再適用確認済み操作をそのまま提案に適用し、legacy は reviewedDeck override を維持する。
+        const proposal = await createProposal(id, body.baseVersion, generated.operations, decision.deckOverride);
         await addMessage(id, "user", body.prompt, { modelId: body.modelId, target: body.target });
         await addMessage(id, "assistant", generated.reply, { mode: "proposal", proposalId: proposal.id, summaries: operationSummaries(generated.operations), review: generated.review });
         // 変更案の意図確認用に参加者が見る出力プレビュー画像を生成する(失敗しても提案作成は成功扱い)。

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { DeckSchema, OperationSchema, SLIDE_H, SLIDE_W, slideFromBlueprint, type Deck, type Element, type Operation, type Slide } from "./document";
 
 export class DocumentError extends Error {
@@ -207,6 +208,44 @@ export function isSmallAIEdit(operations: Operation[]): boolean {
   return operations.length === 1 && [
     "updateText", "moveElement", "resizeElement", "updateStyle", "updateImageProps", "reorderElement",
   ].includes(operations[0].type);
+}
+
+// ツールループの edit ツールが扱う単一要素編集 (agent-harness の ELEMENT_LEVEL_TYPES と対応)。
+type ElementLevelType = "updateText" | "moveElement" | "resizeElement" | "updateStyle" | "updateImageProps" | "reorderElement";
+const ELEMENT_LEVEL_TYPES: readonly Operation["type"][] = [
+  "updateText", "moveElement", "resizeElement", "updateStyle", "updateImageProps", "reorderElement",
+];
+
+function isElementLevelOperation(operation: Operation): operation is Extract<Operation, { type: ElementLevelType }> {
+  return ELEMENT_LEVEL_TYPES.includes(operation.type);
+}
+
+export type AIChangePolicy = "auto" | "proposal";
+
+// ツールループの commit policy を優先し、policy 未指定の legacy は isSmallAIEdit 契約を維持する。
+export function decideAIChangeMode(operations: Operation[], policy?: AIChangePolicy): "applied" | "proposal" {
+  if (policy === "proposal") return "proposal";
+  if (policy === "auto") {
+    if (operations.length === 0) return "proposal";
+    const slideIds = new Set<string>();
+    for (const operation of operations) {
+      if (!isElementLevelOperation(operation)) return "proposal";
+      slideIds.add(operation.slideId);
+    }
+    return slideIds.size === 1 ? "applied" : "proposal";
+  }
+  return isSmallAIEdit(operations) ? "applied" : "proposal";
+}
+
+// 保存済み Deck と操作ログの一致のため、reviewedDeck が operations の再適用と完全一致するかを確認する。検証失敗は false に変換し throw しない。
+export function isReplayableToolLoopResult(current: Deck, operations: Operation[] | null, reviewedDeck: Deck | null): boolean {
+  if (!Array.isArray(operations) || operations.length === 0) return false;
+  if (!reviewedDeck) return false;
+  try {
+    return isDeepStrictEqual(applyOperations(current, operations), reviewedDeck);
+  } catch {
+    return false;
+  }
 }
 
 export function operationSummaries(operations: Operation[]): string[] {

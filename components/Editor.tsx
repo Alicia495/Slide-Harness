@@ -102,13 +102,30 @@ function relativeTime(value: string) {
   return new Date(value).toLocaleString("ja-JP", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function phaseLabel(status: { phase: string; attempt?: number } | null, mode: "plan" | "build"): string {
+type ChatStatus = { phase: string; attempt?: number; tool?: string; status?: string };
+
+// ツールループの tool phase を、ツール名から簡潔な日本語の進行文へ変換する。
+function toolPhaseLabel(tool?: string): string {
+  if (!tool) return "資料を操作しています…";
+  if (tool.startsWith("get_")) return "スライドを読み込んでいます…";
+  if (tool.startsWith("read_")) return "スライドを読み込んでいます…";
+  if (tool.startsWith("edit_")) return "要素を編集しています…";
+  if (tool.startsWith("write_")) return "スライドを書き換えています…";
+  if (tool.startsWith("render_")) return "スライドを描画しています…";
+  if (tool.startsWith("inspect_")) return "レイアウトと見た目を確認しています…";
+  if (tool.startsWith("reflow_")) return "レイアウトを整えています…";
+  if (tool.startsWith("commit_")) return "変更を適用しています…";
+  return "資料を操作しています…";
+}
+
+function phaseLabel(status: ChatStatus | null, mode: "plan" | "build"): string {
   switch (status?.phase) {
     case "context": return "会話の記憶を整理しています…";
     case "generating": return mode === "plan" ? "構成案を作成しています…" : (status && status.attempt && status.attempt > 1 ? "AI の応答を組み直しています…" : "スライドの内容を生成しています…");
     case "repair": return mode === "plan" ? "構成案を再検証しています…" : "生成結果を再検証しています…";
     case "vision": return `AI が画像で意図一致を自己チェックしています…${status && status.attempt && status.attempt > 1 ? `(${status.attempt - 1} 回目以降の再確認)` : ""}`;
     case "rendering": return "出力プレビューを描画しています…";
+    case "tool": return toolPhaseLabel(status?.tool);
     default: return "考えています…";
   }
 }
@@ -158,7 +175,7 @@ export function Editor({ projectId }: { projectId: string }) {
   const chatAbort = useRef<AbortController | null>(null);
   const [retryOps, setRetryOps] = useState<Operation[] | null>(null);
   const [isNarrow, setIsNarrow] = useState(false);
-  const [chatStatus, setChatStatus] = useState<{ phase: string; attempt?: number } | null>(null);
+  const [chatStatus, setChatStatus] = useState<ChatStatus | null>(null);
   const [chatElapsed, setChatElapsed] = useState(0);
   const [proposalPreview, setProposalPreview] = useState<{ id: string; slides: string[] } | null>(null);
   const [chatWidth, setChatWidth] = useState(348);
@@ -315,7 +332,7 @@ export function Editor({ projectId }: { projectId: string }) {
         for (const line of lines) {
           if (!line.trim()) continue;
           const evt = JSON.parse(line) as Record<string, unknown>;
-          if (evt.type === "phase") setChatStatus({ phase: String(evt.phase), attempt: typeof evt.attempt === "number" ? evt.attempt : undefined });
+          if (evt.type === "phase") setChatStatus({ phase: String(evt.phase), attempt: typeof evt.attempt === "number" ? evt.attempt : undefined, tool: typeof evt.tool === "string" ? evt.tool : undefined, status: typeof evt.status === "string" ? evt.status : undefined });
           else if (evt.type === "result") result = evt;
           else if (evt.type === "error") throw new ApiError(String(evt.error || "AI 処理に失敗しました。"), Number(evt.status || 500));
         }

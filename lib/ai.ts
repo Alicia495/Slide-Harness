@@ -61,6 +61,13 @@ function samplingFor(profile: ModelConfig) {
 export type AIPhase = "context" | "generating" | "repair" | "vision" | "rendering" | "tool";
 export type PhaseReporter = (phase: AIPhase, detail?: { attempt?: number; tool?: string; status?: ToolEventRecord["status"] }) => void;
 
+export type AIGenerationMode = "tool-loop" | "legacy";
+
+// ツールループはフラグ有効かつ既存資料があるときのみ。空 Deck の初回作成は legacy のまま。
+export function selectAIGenerationMode(env: Record<string, string | undefined>, deck: Deck): AIGenerationMode {
+  return isToolLoopEnabled(env, deck) ? "tool-loop" : "legacy";
+}
+
 export const REPLY_MAX = 2400;
 export const GENERATE_TIMEOUT_MS = 600000;
 export const VISION_TIMEOUT_MS = 300000;
@@ -351,7 +358,7 @@ Proactive proposal rule:
  - Ask only for choices that materially change the deck; never ask when the request is already clear.
  - When the user answers, confirms, says "おまかせ", "作成して", "その場で", or clearly authorizes proceeding, generate the deck immediately with sensible defaults and state those assumptions in the reply. Do not ask again.`;
 
-export async function generateOperations(projectId: string, deck: Deck, request: string, modelId: string, target?: { slideId?: string; elementId?: string }, plan?: string | null, onPhase?: PhaseReporter): Promise<AIResult & { compacted?: boolean; reviewedDeck?: Deck; review?: DeckReviewReport }> {
+export async function generateOperations(projectId: string, deck: Deck, request: string, modelId: string, target?: { slideId?: string; elementId?: string }, plan?: string | null, onPhase?: PhaseReporter): Promise<AIResult & { compacted?: boolean; reviewedDeck?: Deck; review?: DeckReviewReport; policy?: undefined }> {
   const profile = await getModel(modelId);
   if (!profile) throw new DocumentError("AI モデルを選択してください。");
   if (profile.provider === "demo") throw new DocumentError("Vision 対応を確認したモデルを選択してください。");
