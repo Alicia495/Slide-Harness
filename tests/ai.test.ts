@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, validationFailureMessage, type ModelConfig } from "../lib/ai";
+import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, validationFailureMessage, type ModelConfig } from "../lib/ai";
 import { emptyDeck, type Deck } from "../lib/document";
 import { DocumentError, isSmallAIEdit } from "../lib/operations";
 
@@ -227,5 +227,21 @@ describe("Tool loop system prompt", () => {
   it("does not reuse the JSON-in-prompt operations contract", () => {
     expect(TOOL_LOOP_SYSTEM_PROMPT).not.toContain('"operations":[');
     expect(TOOL_LOOP_SYSTEM_PROMPT).not.toBe(SYSTEM_PROMPT);
+  });
+});
+
+describe("AI generation mode selection", () => {
+  it("selects tool-loop for a non-empty deck with the flag enabled", () => {
+    expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "true" }, deckWithSlide("表紙"))).toBe("tool-loop");
+  });
+
+  it("selects legacy for an empty deck even with the flag enabled", () => {
+    expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "true" }, emptyDeck("空の資料"))).toBe("legacy");
+  });
+
+  it("selects legacy when the flag is not exactly true", () => {
+    const deck = deckWithSlide("表紙");
+    expect(selectAIGenerationMode({ AI_TOOL_LOOP_ENABLED: "false" }, deck)).toBe("legacy");
+    expect(selectAIGenerationMode({}, deck)).toBe("legacy");
   });
 });

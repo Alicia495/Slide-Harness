@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { emptyDeck, ShapeTypeSchema, slideTitle, type Operation } from "../lib/document";
-import { applyOperations, isSmallAIEdit } from "../lib/operations";
+import { emptyDeck, ShapeTypeSchema, slideTitle, type Deck, type Operation } from "../lib/document";
+import { applyOperations, decideAIChangeMode, isReplayableToolLoopResult, isSmallAIEdit } from "../lib/operations";
 
 function deckWithSlide() {
   return applyOperations(emptyDeck(), [{ type: "replaceDeck", title: "製品提案", slides: [
@@ -193,5 +193,121 @@ describe("document operations", () => {
     const clearedImage = cleared.slides[0].elements.find((element) => element.id === image.id);
     expect(clearedImage).toMatchObject({ borderRadius: 0 });
     expect(clearedImage && "stroke" in clearedImage ? clearedImage.stroke : undefined).toBeUndefined();
+  });
+});
+
+describe("AI change mode decision", () => {
+  it("applies auto-policy element edits on a single slide even when multiple", () => {
+    const deck = deckWithSlide();
+    const slideId = deck.slides[0].id;
+    const texts = deck.slides[0].elements.filter((element) => element.kind === "text");
+    const operations: Operation[] = texts.slice(0, 2).map((element, index) => ({
+      type: "updateText", slideId, elementId: element.id, text: `更新 ${index + 1}`,
+    }));
+    expect(operations.length).toBe(2);
+    expect(decideAIChangeMode(operations, "auto")).toBe("applied");
+  });
+
+  it("keeps proposal-policy edits as proposals even for a single element", () => {
+    const deck = deckWithSlide();
+    const operation: Operation = { type: "updateText", slideId: deck.slides[0].id, elementId: deck.slides[0].elements[0].id, text: "更新" };
+    expect(decideAIChangeMode([operation], "proposal")).toBe("proposal");
+  });
+
+  it("matches the existing isSmallAIEdit contract when no policy is supplied", () => {
+    const deck = deckWithSlide();
+    const slideId = deck.slides[0].id;
+    const single: Operation[] = [{ type: "updateText", slideId, elementId: deck.slides[0].elements[0].id, text: "更新" }];
+    const pair: Operation[] = [
+      { type: "updateText", slideId, elementId: deck.slides[0].elements[0].id, text: "更新 1" },
+      { type: "moveElement", slideId, elementId: deck.slides[0].elements[1].id, x: 1, y: 1 },
+    ];
+    const slideChange: Operation[] = [{ type: "deleteSlide", slideId }];
+    expect(decideAIChangeMode(single)).toBe(isSmallAIEdit(single) ? "applied" : "proposal");
+    expect(decideAIChangeMode(single)).toBe("applied");
+    expect(decideAIChangeMode(pair)).toBe(isSmallAIEdit(pair) ? "applied" : "proposal");
+    expect(decideAIChangeMode(pair)).toBe("proposal");
+    expect(decideAIChangeMode(slideChange)).toBe("proposal");
+  });
+});
+
+describe("Tool loop result replayability", () => {
+  function singleEditText(deck: Deck): Operation[] {
+    return [{ type: "updateText", slideId: deck.slides[0].id, elementId: deck.slides[0].elements[0].id, text: "レビュー済み" }];
+  }
+
+  it("accepts a reviewed deck that equals replaying the operations on the current deck", () => {
+    const current = deckWithSlide();
+    const operations = singleEditText(current);
+    const reviewedDeck = applyOperations(current, operations);
+    expect(isReplayableToolLoopResult(current, operations, reviewedDeck)).toBe(true);
+  });
+
+  it("rejects a reviewed deck that differs from the replay result", () => {
+    const current = deckWithSlide();
+    const operations = singleEditText(current);
+    expect(isReplayableToolLoopResult(current, operations, current)).toBe(false);
+    const extra = applyOperations(applyOperations(current, operations), [
+      { type: "moveElement", slideId: current.slides[1].id, elementId: current.slides[1].elements[0].id, x: 1, y: 1 },
+    ]);
+    expect(isReplayableToolLoopResult(current, operations, extra)).toBe(false);
+  });
+
+  it("rejects invalid or empty operations instead of throwing", () => {
+    const current = deckWithSlide();
+    const invalid: Operation[] = [{ type: "updateText", slideId: current.slides[0].id, elementId: crypto.randomUUID(), text: "存在しない" }];
+    expect(isReplayableToolLoopResult(current, invalid, current)).toBe(false);
+    expect(isReplayableToolLoopResult(current, [], current)).toBe(false);
+  });
+
+  it("replays replaceSlide preserving the slide id and every element id", () => {
+    const current = deckWithSlide();
+    const slide = current.slides[1];
+    const replaced = structuredClone(slide);
+    const title = replaced.elements.find((element) => element.kind === "text" && element.role === "title");
+    if (!title || title.kind !== "text") throw new Error("missing title");
+    title.text = "全面書き換え";
+    const operations: Operation[] = [{ type: "replaceSlide", slideId: slide.id, slide: replaced }];
+    const reviewedDeck = applyOperations(current, operations);
+    expect(isReplayableToolLoopResult(current, operations, reviewedDeck)).toBe(true);
+    expect(reviewedDeck.slides.map((item) => item.id)).toEqual(current.slides.map((item) => item.id));
+    expect(reviewedDeck.slides[1].id).toBe(slide.id);
+    expect(reviewedDeck.slides[1].elements.map((element) => element.id)).toEqual(slide.elements.map((element) => element.id));
+    const replayed = applyOperations(current, operations);
+    expect(replayed.slides[1].elements.map((element) => element.id)).toEqual(slide.elements.map((element) => element.id));
+  });
+
+  it("rejects a replaceSlide reviewed deck whose element ids were regenerated", () => {
+    const current = deckWithSlide();
+    const slide = current.slides[1];
+    const replaced = structuredClone(slide);
+    const title = replaced.elements.find((element) => element.kind === "text" && element.role === "title");
+    if (!title || title.kind !== "text") throw new Error("missing title");
+    title.text = "全面書き換え";
+    const operations: Operation[] = [{ type: "replaceSlide", slideId: slide.id, slide: replaced }];
+    const reviewedDeck = applyOperations(current, operations);
+    const regenerated = structuredClone(reviewedDeck);
+    regenerated.slides[1] = {
+      ...regenerated.slides[1],
+      elements: regenerated.slides[1].elements.map((element) => ({ ...element, id: crypto.randomUUID() })),
+    };
+    expect(isReplayableToolLoopResult(current, operations, regenerated)).toBe(false);
+  });
+});
+
+describe("replaceSlide application regression", () => {
+  it("preserves the slide id and every element id when applying replaceSlide", () => {
+    const current = deckWithSlide();
+    const slide = current.slides[1];
+    const replaced = structuredClone(slide);
+    const title = replaced.elements.find((element) => element.kind === "text" && element.role === "title");
+    if (!title || title.kind !== "text") throw new Error("missing title");
+    title.text = "全面書き換え";
+    const applied = applyOperations(current, [{ type: "replaceSlide", slideId: slide.id, slide: replaced }]);
+    expect(applied.slides.map((item) => item.id)).toEqual(current.slides.map((item) => item.id));
+    expect(applied.slides[1].id).toBe(slide.id);
+    expect(applied.slides[1].elements.map((element) => element.id)).toEqual(slide.elements.map((element) => element.id));
+    const rewritten = applied.slides[1].elements.find((element) => element.id === title.id);
+    expect(rewritten && rewritten.kind === "text" ? rewritten.text : undefined).toBe("全面書き換え");
   });
 });
