@@ -84,21 +84,27 @@ describe("PPTX export", () => {
   });
 
   it("maps every supported shape to an editable PowerPoint shape", async () => {
-    const deck = applyOperations(emptyDeck(), [{ type: "replaceDeck", title: "図形テスト", slides: [{ layout: "title", title: "図形テスト" }] }]);
-    const slideId = deck.slides[0].id;
+    const deck = applyOperations(emptyDeck(), [{ type: "replaceDeck", title: "図形テスト", slides: [
+      { layout: "title", title: "図形テスト" },
+      { layout: "section", title: "図形グリッド" },
+    ] }]);
+    const slideId = deck.slides[1].id;
     const operations: Operation[] = ShapeTypeSchema.options.map((shape, index) => ({
       type: "addShape",
       slideId,
       shape,
-      x: 0.5 + index % 7 * 1.7,
-      y: 2 + Math.floor(index / 7) * 1.5,
+      x: 0.2 + index % 8 * 1.6,
+      y: 0.35 + Math.floor(index / 8) * 0.85,
       w: 1.2,
       h: 0.8,
       fill: "#3156D3",
     }));
-    const bytes = await buildPptx(applyOperations(deck, operations), new Map());
+    const filled = operations.reduce((deck, _, index) => index % 30 === 0
+      ? applyOperations(deck, operations.slice(index, index + 30))
+      : deck, deck);
+    const bytes = await buildPptx(filled, new Map());
     const zip = await JSZip.loadAsync(bytes);
-    const slide = await zip.file("ppt/slides/slide1.xml")?.async("string");
+    const slide = await zip.file("ppt/slides/slide2.xml")?.async("string");
     const presetByShape: Record<ShapeType, string> = {
       rect: "rect",
       roundRect: "roundRect",
@@ -113,6 +119,51 @@ describe("PPTX export", () => {
       chevron: "chevron",
       triangle: "triangle",
       callout: "wedgeRoundRectCallout",
+      diamond: "diamond",
+      hexagon: "hexagon",
+      pentagon: "pentagon",
+      octagon: "octagon",
+      parallelogram: "parallelogram",
+      trapezoid: "trapezoid",
+      star4: "star4",
+      star5: "star5",
+      star6: "star6",
+      plus: "plus",
+      donut: "donut",
+      heart: "heart",
+      sun: "sun",
+      frame: "frame",
+      plaque: "plaque",
+      corner: "corner",
+      bentArrow: "bentArrow",
+      bentUpArrow: "bentUpArrow",
+      curvedRightArrow: "curvedRightArrow",
+      curvedLeftArrow: "curvedLeftArrow",
+      quadArrow: "quadArrow",
+      circularArrow: "circularArrow",
+      cloudCallout: "cloudCallout",
+      wedgeRectCallout: "wedgeRectCallout",
+      leftArrowCallout: "leftArrowCallout",
+      rightArrowCallout: "rightArrowCallout",
+      flowChartTerminator: "flowChartTerminator",
+      flowChartProcess: "flowChartProcess",
+      flowChartDecision: "flowChartDecision",
+      flowChartInputOutput: "flowChartInputOutput",
+      flowChartPredefinedProcess: "flowChartPredefinedProcess",
+      flowChartDocument: "flowChartDocument",
+      flowChartMultidocument: "flowChartMultidocument",
+      flowChartInternalStorage: "flowChartInternalStorage",
+      flowChartConnector: "flowChartConnector",
+      flowChartOffpageConnector: "flowChartOffpageConnector",
+      flowChartManualInput: "flowChartManualInput",
+      flowChartPreparation: "flowChartPreparation",
+      flowChartDelay: "flowChartDelay",
+      flowChartMerge: "flowChartMerge",
+      flowChartCollate: "flowChartCollate",
+      flowChartSort: "flowChartSort",
+      flowChartSummingJunction: "flowChartSummingJunction",
+      flowChartOr: "flowChartOr",
+      flowChartExtract: "flowChartExtract",
     };
     for (const preset of Object.values(presetByShape)) expect(slide).toContain(`prst="${preset}"`);
   });
@@ -139,7 +190,7 @@ describe("PPTX export", () => {
         borderRadius: 0.2,
         stroke: "#D24646",
       }]);
-      const bytes = await buildPptx(withImage, new Map([[assetId, imagePath]]));
+            const bytes = await buildPptx(withImage, new Map([[assetId, imagePath]]));
       const zip = await JSZip.loadAsync(bytes);
       const slide = await zip.file("ppt/slides/slide1.xml")?.async("string");
       expect(slide).toContain("装飾画像");

@@ -260,7 +260,12 @@ Allowed operations:
 - {"type":"addSlide","slide":{same slide fields},"index":0}
 - {"type":"deleteSlide","slideId":"uuid"}
 - {"type":"reorderSlide","slideId":"uuid","toIndex":0}
-- {"type":"addShape","slideId":"uuid","shape":"rect|roundRect|ellipse|line|rightArrow|leftArrow|upArrow|downArrow|leftRightArrow|upDownArrow|chevron|triangle|callout","x":1,"y":1,"w":2,"h":1,"fill":"#3156D3","stroke":"#182230","arrowHead":"none|start|end|both","rotation":0}
+- {"type":"addShape","slideId":"uuid","shape":"<shape>","x":1,"y":1,"w":2,"h":1,"fill":"#3156D3","stroke":"#182230","arrowHead":"none|start|end|both","rotation":0}
+  <shape> choices by category:
+  - Basic: rect, roundRect, ellipse, line, triangle, diamond, hexagon, pentagon, octagon, parallelogram, trapezoid, star4, star5, star6, plus, donut, heart, sun, frame, plaque, corner
+  - Arrows: rightArrow, leftArrow, upArrow, downArrow, leftRightArrow, upDownArrow, chevron, bentArrow, bentUpArrow, curvedRightArrow, curvedLeftArrow, quadArrow, circularArrow (arrowHead applies only to "line")
+  - Callouts: callout, wedgeRectCallout, cloudCallout, leftArrowCallout, rightArrowCallout
+  - Flowchart: flowChartTerminator (start/end), flowChartProcess (process box), flowChartDecision (branch), flowChartInputOutput (I/O), flowChartPredefinedProcess, flowChartDocument, flowChartMultidocument, flowChartInternalStorage, flowChartConnector (circle), flowChartOffpageConnector, flowChartManualInput, flowChartPreparation, flowChartDelay, flowChartMerge, flowChartCollate, flowChartSort, flowChartSummingJunction (merge point), flowChartOr, flowChartExtract
 - {"type":"addIcon","slideId":"uuid","name":"LucideIconName (e.g. Rocket, Shield, Target, Zap, Users, Clock, Lightbulb, Award)","x":1,"y":1,"w":1,"h":1,"color":"#3156D3","rotation":0}
 - {"type":"deleteElement","slideId":"uuid","elementId":"uuid"}
 - {"type":"reorderElement","slideId":"uuid","elementId":"uuid","action":"bringToFront|sendToBack|bringForward|sendBackward"}
@@ -280,6 +285,7 @@ Design guidelines:
 - For a new deck, at least two thirds of non-cover slides must use 'cards', 'steps', 'kpi', 'comparison', 'chart', or 'table'. Mix appropriate layouts instead of repeatedly using one layout.
 - Use charts only with concrete numeric data from the user or document context. Never invent numbers merely to add a chart; use cards, steps, comparison, or icons instead.
 - When using 'cards', select relevant Lucide icon names (e.g. Shield for security, Zap for speed, Target for goals, Users for teams, Rocket for launch/growth, Clock for time saving).
+- Build custom diagrams with addShape when the content has structure. For process and decision flows, compose flowchart shapes (flowChartTerminator for start/end, flowChartProcess for steps, flowChartDecision for branches, flowChartDocument for data, flowChartConnector for junctions) and connect them with line shapes using arrowHead:"end". Place a short text element on top of each shape as its label. Use callout shapes to highlight key points, star/plus to emphasize highlights, and quadArrow or leftRightArrow to show relationships.
 - For a new deck, create 3-6 varied, visually engaging slides with specific, concise Japanese content.
 - Reply and operations must agree.`;
 

@@ -4,23 +4,13 @@ import { getIconSvgDataUri } from "./icon-svg";
 
 const hex = (value: string) => value.replace(/^#/, "");
 
+const PPTX_SHAPE_NAMES: Partial<Record<ShapeType, string>> = {
+  callout: "wedgeRoundRectCallout",
+};
+
 function getPptxShapeType(pptx: PptxGenJS, shape: ShapeType): PptxGenJS.ShapeType {
-  switch (shape) {
-    case "rect": return pptx.ShapeType.rect;
-    case "roundRect": return pptx.ShapeType.roundRect;
-    case "ellipse": return pptx.ShapeType.ellipse;
-    case "line": return pptx.ShapeType.line;
-    case "rightArrow": return pptx.ShapeType.rightArrow;
-    case "leftArrow": return pptx.ShapeType.leftArrow;
-    case "upArrow": return pptx.ShapeType.upArrow;
-    case "downArrow": return pptx.ShapeType.downArrow;
-    case "leftRightArrow": return pptx.ShapeType.leftRightArrow;
-    case "upDownArrow": return pptx.ShapeType.upDownArrow;
-    case "chevron": return pptx.ShapeType.chevron;
-    case "triangle": return pptx.ShapeType.triangle;
-    case "callout": return pptx.ShapeType.wedgeRoundRectCallout;
-    default: return pptx.ShapeType.rect;
-  }
+  const name = PPTX_SHAPE_NAMES[shape] ?? shape;
+  return (pptx.ShapeType as Record<string, PptxGenJS.ShapeType>)[name] ?? pptx.ShapeType.rect;
 }
 
 function addElement(pptx: PptxGenJS, slide: PptxGenJS.Slide, element: Element, fontFace: string, assetPaths: Map<string, string>): void {

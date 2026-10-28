@@ -25,9 +25,27 @@ export const TextElementSchema = z.object({
 });
 
 export const ShapeTypeSchema = z.enum([
-  "rect", "roundRect", "ellipse", "line",
+  // 基本図形
+  "rect", "roundRect", "ellipse", "line", "triangle",
+  // 基本ポリゴン
+  "diamond", "hexagon", "pentagon", "octagon", "parallelogram", "trapezoid",
+  "star4", "star5", "star6", "plus", "donut", "heart", "sun",
+  "frame", "plaque", "corner",
+  // 矢印
   "rightArrow", "leftArrow", "upArrow", "downArrow",
-  "leftRightArrow", "upDownArrow", "chevron", "triangle", "callout",
+  "leftRightArrow", "upDownArrow", "chevron",
+  "bentArrow", "bentUpArrow", "curvedRightArrow", "curvedLeftArrow",
+  "quadArrow", "circularArrow",
+  // 吹き出し
+  "callout", "cloudCallout", "wedgeRectCallout",
+  "leftArrowCallout", "rightArrowCallout",
+  // フローチャート
+  "flowChartTerminator", "flowChartProcess", "flowChartDecision", "flowChartInputOutput",
+  "flowChartPredefinedProcess", "flowChartDocument", "flowChartMultidocument",
+  "flowChartInternalStorage", "flowChartConnector", "flowChartOffpageConnector",
+  "flowChartManualInput", "flowChartPreparation", "flowChartDelay",
+  "flowChartMerge", "flowChartCollate", "flowChartSort",
+  "flowChartSummingJunction", "flowChartOr", "flowChartExtract",
 ]);
 export type ShapeType = z.infer<typeof ShapeTypeSchema>;
 

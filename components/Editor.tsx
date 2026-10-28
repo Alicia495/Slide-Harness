@@ -2,17 +2,89 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUp, ArrowUpToLine, Check, ChevronDown, ChevronsRight, Circle, CircleAlert, CircleCheck, Download, Eye, FilePlus2, History, ImagePlus, Layers3, LayoutTemplate, ListChecks, Loader2, MessageSquare, MoveHorizontal, MoveVertical, Plus, RotateCcw, RotateCw, Send, Settings2, Shapes, Smile, Sparkles, Square, Trash2, Triangle, X } from "lucide-react";
+import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowUp, ArrowUpToLine, Check, ChevronDown, CircleAlert, CircleCheck, Download, Eye, FilePlus2, History, ImagePlus, Layers3, LayoutTemplate, ListChecks, Loader2, MessageSquare, Plus, RotateCcw, RotateCw, Send, Settings2, Shapes, Smile, Sparkles, Trash2, X } from "lucide-react";
 import { slideTitle, type Deck, type Element, type Operation, type ShapeType, type Slide, type Theme } from "@/lib/document";
 import type { ModelProfile } from "@/lib/ai";
 import type { ChatMessage, ProjectRecord, Proposal } from "@/lib/projects";
-import { SlideCanvas } from "./SlideCanvas";
+import { SlideCanvas, ShapePreview } from "./SlideCanvas";
 import { IconPickerModal } from "./IconPickerModal";
 import { Modal } from "./Modal";
 
 type HistoryItem = { version: number; source: string; summary: string; createdAt: string };
 type ProjectPayload = { project: ProjectRecord; history: HistoryItem[]; messages: ChatMessage[]; proposal: Proposal | null };
 type SaveState = "saved" | "saving" | "error";
+
+type ShapePickerItem = { shape: ShapeType; label: string; arrowHead?: "none" | "start" | "end" | "both" };
+const SHAPE_GROUPS: { label: string; items: ShapePickerItem[] }[] = [
+  { label: "基本図形", items: [
+    { shape: "rect", label: "四角" },
+    { shape: "roundRect", label: "角丸" },
+    { shape: "ellipse", label: "円" },
+    { shape: "triangle", label: "三角" },
+    { shape: "diamond", label: "ひし形" },
+    { shape: "hexagon", label: "六角形" },
+    { shape: "pentagon", label: "五角形" },
+    { shape: "octagon", label: "八角形" },
+    { shape: "parallelogram", label: "平行四辺形" },
+    { shape: "trapezoid", label: "台形" },
+    { shape: "star4", label: "星(4)" },
+    { shape: "star5", label: "星" },
+    { shape: "star6", label: "星(6)" },
+    { shape: "plus", label: "十字" },
+    { shape: "donut", label: "ドンナト" },
+    { shape: "heart", label: "ハート" },
+    { shape: "sun", label: "太陽" },
+    { shape: "frame", label: "額枠" },
+    { shape: "plaque", label: "額縁" },
+    { shape: "corner", label: "コーナー" },
+  ] },
+  { label: "線・矢印", items: [
+    { shape: "line", label: "直線" },
+    { shape: "line", label: "矢印線", arrowHead: "end" },
+    { shape: "line", label: "双方向線", arrowHead: "both" },
+    { shape: "rightArrow", label: "右矢印" },
+    { shape: "leftArrow", label: "左矢印" },
+    { shape: "upArrow", label: "上矢印" },
+    { shape: "downArrow", label: "下矢印" },
+    { shape: "leftRightArrow", label: "左右両矢印" },
+    { shape: "upDownArrow", label: "上下両矢印" },
+    { shape: "chevron", label: "シェブロン" },
+    { shape: "bentArrow", label: "折れ矢印(下)" },
+    { shape: "bentUpArrow", label: "折れ矢印(上)" },
+    { shape: "curvedRightArrow", label: "カーブ矢印(右)" },
+    { shape: "curvedLeftArrow", label: "カーブ矢印(左)" },
+    { shape: "quadArrow", label: "十字矢印" },
+    { shape: "circularArrow", label: "循環矢印" },
+  ] },
+  { label: "吹き出し", items: [
+    { shape: "callout", label: "吹き出し" },
+    { shape: "wedgeRectCallout", label: "角吹き出し" },
+    { shape: "cloudCallout", label: "雲吹き出し" },
+    { shape: "leftArrowCallout", label: "左矢印吹き出し" },
+    { shape: "rightArrowCallout", label: "右矢印吹き出し" },
+  ] },
+  { label: "フローチャート", items: [
+    { shape: "flowChartTerminator", label: "開始/終了" },
+    { shape: "flowChartProcess", label: "処理" },
+    { shape: "flowChartDecision", label: "判断" },
+    { shape: "flowChartInputOutput", label: "入出力" },
+    { shape: "flowChartPredefinedProcess", label: "事前定義処理" },
+    { shape: "flowChartDocument", label: "文書" },
+    { shape: "flowChartMultidocument", label: "複数文書" },
+    { shape: "flowChartInternalStorage", label: "内部ストレージ" },
+    { shape: "flowChartConnector", label: "結合子" },
+    { shape: "flowChartOffpageConnector", label: "オフページ" },
+    { shape: "flowChartManualInput", label: "手入力" },
+    { shape: "flowChartPreparation", label: "準備" },
+    { shape: "flowChartDelay", label: "遅延" },
+    { shape: "flowChartMerge", label: "マージ" },
+    { shape: "flowChartCollate", label: "照合" },
+    { shape: "flowChartSort", label: "ソート" },
+    { shape: "flowChartSummingJunction", label: "合流点" },
+    { shape: "flowChartOr", label: "OR" },
+    { shape: "flowChartExtract", label: "抽出" },
+  ] },
+];
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -261,8 +333,9 @@ export function Editor({ projectId }: { projectId: string }) {
     if (!currentSlide || !project || busy || proposal || commitInFlight.current) return;
     const isLine = shape === "line";
     const isArrow = shape.includes("Arrow") || shape === "chevron";
-    const w = isLine ? 3.5 : isArrow ? 2.0 : 2.5;
-    const h = isLine ? 0.4 : isArrow ? 0.8 : 2.0;
+    const isRound = ["ellipse", "donut", "sun", "heart", "star4", "star5", "star6", "plus", "circularArrow", "flowChartConnector", "flowChartSummingJunction", "flowChartOr"].includes(shape);
+    const w = isLine ? 3.5 : isRound ? 2.2 : isArrow ? 2.0 : 2.5;
+    const h = isLine ? 0.4 : isRound ? 2.2 : isArrow ? 0.8 : 2.0;
     void commit([{
       type: "addShape",
       slideId: currentSlide.id,
@@ -505,24 +578,20 @@ export function Editor({ projectId }: { projectId: string }) {
                 <Shapes size={16}/>図形 <ChevronDown size={12}/>
               </button>
               {showShapes && (
-                <div className="popover-menu" style={{ width: "300px" }}>
-                  <div className="popover-grid">
-                    <button className="popover-grid-btn" onClick={() => { addShape("rect"); setShowShapes(false); }} title="四角形"><Square size={16}/><span>四角</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("roundRect"); setShowShapes(false); }} title="角丸四角形"><Square size={16} style={{ borderRadius: "4px" }}/><span>角丸</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("ellipse"); setShowShapes(false); }} title="円"><Circle size={16}/><span>円</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("line"); setShowShapes(false); }} title="直線"><span aria-hidden="true">―</span><span>直線</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("line", { arrowHead: "end" }); setShowShapes(false); }} title="矢印線"><ArrowRight size={16}/><span>矢印線</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("line", { arrowHead: "both" }); setShowShapes(false); }} title="双方向矢印線"><MoveHorizontal size={16}/><span>双方向線</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("rightArrow"); setShowShapes(false); }} title="右矢印"><ArrowRight size={16}/><span>右矢印</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("leftArrow"); setShowShapes(false); }} title="左矢印"><ArrowLeft size={16}/><span>左矢印</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("upArrow"); setShowShapes(false); }} title="上矢印"><ArrowUp size={16}/><span>上矢印</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("downArrow"); setShowShapes(false); }} title="下矢印"><ArrowDown size={16}/><span>下矢印</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("leftRightArrow"); setShowShapes(false); }} title="左右両矢印"><MoveHorizontal size={16}/><span>左右両矢印</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("upDownArrow"); setShowShapes(false); }} title="上下両矢印"><MoveVertical size={16}/><span>上下両矢印</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("chevron"); setShowShapes(false); }} title="シェブロン"><ChevronsRight size={16}/><span>シェブロン</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("triangle"); setShowShapes(false); }} title="三角形"><Triangle size={16}/><span>三角形</span></button>
-                    <button className="popover-grid-btn" onClick={() => { addShape("callout"); setShowShapes(false); }} title="吹き出し"><MessageSquare size={16}/><span>吹き出し</span></button>
-                  </div>
+                <div className="popover-menu" style={{ width: "340px", maxHeight: "420px", overflowY: "auto" }}>
+                  {SHAPE_GROUPS.map((group) => (
+                    <div key={group.label}>
+                      <div className="popover-group-label">{group.label}</div>
+                      <div className="popover-grid popover-grid-shapes">
+                        {group.items.map((item) => (
+                          <button key={`${item.shape}-${item.arrowHead ?? ""}`} className="popover-grid-btn" onClick={() => { addShape(item.shape, item.arrowHead ? { arrowHead: item.arrowHead } : {}); setShowShapes(false); }} title={item.label}>
+                            <ShapePreview shape={item.shape} arrowHead={item.arrowHead} />
+                            <span>{item.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

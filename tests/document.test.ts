@@ -75,21 +75,23 @@ describe("document operations", () => {
   });
 
   it("accepts every supported shape and rejects invalid rotation", () => {
-    const deck = deckWithSlide();
-    const slideId = deck.slides[0].id;
+    const deck = applyOperations(deckWithSlide(), [{ type: "addSlide", slide: { layout: "section", title: "図形グリッド" }, index: 2 }]);
+    const slideId = deck.slides[2].id;
     const operations: Operation[] = ShapeTypeSchema.options.map((shape, index) => ({
       type: "addShape",
       slideId,
       shape,
-      x: index * 0.5,
-      y: 3,
+      x: (index % 26) * 0.5,
+      y: 3 + Math.floor(index / 26) * 0.7,
       w: 0.4,
       h: 0.4,
       fill: "#3156D3",
       arrowHead: shape === "line" ? "both" : undefined,
     }));
-    const updated = applyOperations(deck, operations);
-    expect(updated.slides[0].elements.filter((element) => element.kind === "shape").length).toBeGreaterThanOrEqual(ShapeTypeSchema.options.length);
+    const updated = operations.reduce((deck, _, index) => index % 30 === 0
+      ? applyOperations(deck, operations.slice(index, index + 30))
+      : deck, deck);
+    expect(updated.slides[2].elements.filter((element) => element.kind === "shape").length).toBeGreaterThanOrEqual(ShapeTypeSchema.options.length);
     expect(() => applyOperations(deck, [{
       type: "addShape",
       slideId,

@@ -67,6 +67,8 @@
 .toolbar-dropdown{position:relative}
 .popover-menu{position:absolute;top:100%;left:0;margin-top:6px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:8px;z-index:50;display:flex;flex-direction:column;gap:4px;min-width:160px}
 .popover-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:4px}
+.popover-grid-shapes{grid-template-columns:repeat(5,1fr)}
+.popover-group-label{font-size:10px;font-weight:700;color:#8a97a8;padding:6px 4px 0;letter-spacing:.04em}
 .popover-grid-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:8px 4px;border:1px solid #eef1f5;border-radius:8px;background:#fff;font-size:10px;color:#516072;transition:background .15s,border-color .15s}
 .popover-grid-btn:hover{background:#f0f4fc;border-color:#b7c9f2;color:var(--blue)}
 .popover-grid-btn svg{width:22px;height:22px}
