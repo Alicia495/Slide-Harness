@@ -431,9 +431,15 @@ export async function generateOperations(projectId: string, deck: Deck, request:
 }
 
 export const TOOL_LOOP_MAX_STEPS = 10;
+export const TOOL_LOOP_CREATE_MAX_STEPS = 14;
 export const TOOL_LOOP_MAX_DURATION_MS = 900000;
 export const TOOL_LOOP_MAX_TOTAL_TOKENS = 120000;
 const TOOL_LOOP_DEFAULT_CONTEXT_TOKENS = 32768;
+
+// 新規作成 Run は write_deck 後の検査・修正・commit へ進むため、編集 Run より広い step 予算を持つ。
+export function toolLoopMaxSteps(deck: Deck): number {
+  return deck.slides.length ? TOOL_LOOP_MAX_STEPS : TOOL_LOOP_CREATE_MAX_STEPS;
+}
 
 type TokenUsageStep = { usage: { totalTokens: number | undefined } };
 
@@ -463,7 +469,7 @@ Do not paste the deck, the rendered image, or an editing protocol into your text
 export function toolLoopWorkflowInstruction(deck: Deck): string {
   return deck.slides.length
     ? "Read the deck with the tools, make the edits, inspect them, and end with commit_changes."
-    : "The deck has no slides. Create it in one write_deck call with 3-6 varied slides, inspect the result, fix any layout issues, and end with commit_changes.";
+    : "The deck has no slides. Create it in one write_deck call with 3-6 varied slides. Then inspect every slide with inspect_layout in one parallel step, apply at most one round of edits, and end with commit_changes.";
 }
 
 // ツールループでは deck 全文を prompt へ入れない。概要は read ツールで取得させる。
@@ -625,7 +631,7 @@ export async function generateToolLoopOperations(
     vision: ({ image, slideId, intent }) => requestVisualInsight(model, profile, image, slideId, intent),
   };
   const runtime = createInspectionRuntime(inspectionDeps, { visionSupported: profile.visionSupported });
-  const budget = createAgentRunBudget({ maxSteps: TOOL_LOOP_MAX_STEPS, maxDurationMs: TOOL_LOOP_MAX_DURATION_MS, now: () => Date.now() });
+  const budget = createAgentRunBudget({ maxSteps: toolLoopMaxSteps(deck), maxDurationMs: TOOL_LOOP_MAX_DURATION_MS, now: () => Date.now() });
   const toolStarts = new Map<string, number>();
   const runContext = {
     workingCopy,
@@ -666,7 +672,7 @@ export async function generateToolLoopOperations(
       tools,
       stopWhen: [
         hasToolCall("commit_changes"),
-        stepCountIs(TOOL_LOOP_MAX_STEPS),
+        stepCountIs(toolLoopMaxSteps(deck)),
         ({ steps }) => tokenUsageExceedsBudget(steps, tokenBudget),
         () => isAgentBudgetExhausted(runContext),
       ],
