@@ -21,11 +21,13 @@ import {
   createWorkingCopy,
   editElements,
   executeAgentTool,
+  finalizeAgentRunState,
   getAgentRunState,
   getDeckSummary,
   getSlide,
   inspectLayout,
   inspectVisual,
+  isAgentBudgetExhausted,
   isToolLoopEnabled,
   renderSlide,
   reflowSlide,
@@ -632,6 +634,64 @@ describe("agent run budget", () => {
     const registry = createAgentToolRegistry(context);
     await executeAgentTool(registry, "get_deck_summary", {});
     await expect(executeAgentTool(registry, "get_slide", { slideId: source.slides[1].id })).rejects.toThrow(/step|ステップ|予算/i);
+    expect(isAgentBudgetExhausted(context)).toBe(true);
+  });
+});
+
+describe("run finalization", () => {
+  it("captures edits that complete after commit_changes in the same model step", async () => {
+    const f = toolLoopFixture();
+    const slide = getSlide(f.workingCopy, f.slideId);
+    const title = titleElement(slide);
+    const body = slide.elements.find((element) => element.kind === "text" && element.role === "body");
+    if (!body || body.kind !== "text") throw new Error("missing body element");
+    await executeAgentTool(f.registry, "edit_elements", {
+      slideId: f.slideId,
+      patches: [{ elementId: title.id, text: "先の編集" }],
+    });
+    await executeAgentTool(f.registry, "commit_changes", { reply: "更新しました" });
+    await executeAgentTool(f.registry, "edit_elements", {
+      slideId: f.slideId,
+      patches: [{ elementId: body.id, text: "同一stepで完了した編集" }],
+    });
+    const state = finalizeAgentRunState(f.context);
+    expect(state.operations).toHaveLength(2);
+    expect(state.workingDeck).toEqual(f.workingCopy.deck);
+    expect(applyOperations(f.source, state.operations)).toEqual(state.workingDeck);
+  });
+});
+
+describe("working copy operation budget", () => {
+  it("rejects more than 30 accumulated operations before mutating the working copy", () => {
+    const source = sampleDeck();
+    const workingCopy = createWorkingCopy(source, 0);
+    const slide = source.slides[1];
+    const title = titleElement(slide);
+    const patches: ElementPatch[] = Array.from({ length: 11 }, (_unused, index) => ({
+      elementId: title.id,
+      text: `更新 ${index}`,
+      x: title.x,
+      y: title.y,
+      fontSize: title.fontSize,
+    }));
+    expect(() => editElements(workingCopy, slide.id, patches)).toThrow(/30|操作|分割/);
+    expect(workingCopy.deck).toEqual(source);
+    expect(workingCopy.operations).toHaveLength(0);
+  });
+
+  it("rejects the 31st accumulated operation without changing the accepted 30-operation state", () => {
+    const source = sampleDeck();
+    const workingCopy = createWorkingCopy(source, 0);
+    const slide = source.slides[1];
+    const title = titleElement(slide);
+    for (let index = 0; index < 30; index++) {
+      editElements(workingCopy, slide.id, [{ elementId: title.id, text: `更新 ${index}` }]);
+    }
+    const accepted = structuredClone(workingCopy.deck);
+    expect(workingCopy.operations).toHaveLength(30);
+    expect(() => editElements(workingCopy, slide.id, [{ elementId: title.id, text: "31件目" }])).toThrow(/30|操作|分割/);
+    expect(workingCopy.deck).toEqual(accepted);
+    expect(workingCopy.operations).toHaveLength(30);
   });
 });
 
