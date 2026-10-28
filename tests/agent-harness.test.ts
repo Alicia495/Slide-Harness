@@ -594,7 +594,8 @@ describe("commit_changes", () => {
 
 describe("write_deck", () => {
   it("writes the whole deck through typed operations with explicit slide ids that replay deterministically", () => {
-    const workingCopy = createWorkingCopy(emptyDeck("新規資料"), 0);
+    const base = emptyDeck("新規資料");
+    const workingCopy = createWorkingCopy(base, 0);
     const result = writeDeck(workingCopy, {
       title: "新規提案",
       slides: [
@@ -611,9 +612,9 @@ describe("write_deck", () => {
     expect(result.changeKinds).toEqual(["replaceDeckSlides"]);
     expect(workingCopy.operations).toHaveLength(1);
     // 操作ログの再適用が Working Copy と完全一致し、保存時の検証を必ず通る。
-    const replayed = applyOperations(emptyDeck("新規資料"), result.operations);
+    const replayed = applyOperations(base, result.operations);
     expect(replayed).toEqual(result.deck);
-    expect(applyOperations(emptyDeck("新規資料"), result.operations)).toEqual(result.deck);
+    expect(applyOperations(base, result.operations)).toEqual(result.deck);
   });
 
   it("rejects an empty slide list", () => {

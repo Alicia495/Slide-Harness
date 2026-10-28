@@ -195,6 +195,8 @@ export const OperationSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("updateImageProps"), slideId: z.uuid(), elementId: z.uuid(), objectFit: z.enum(["contain", "cover", "fill"]).optional(), borderRadius: z.number().min(0).max(1).optional(), stroke: color.nullable().optional() }),
   // Working Copy の write_slide 用。対象スライドを完全な SlideSchema で置き換える。
   z.object({ type: z.literal("replaceSlide"), slideId: z.uuid(), slide: SlideSchema }),
+  // Working Copy の write_deck 用。全スライドを明示 ID 付きの完全な SlideSchema で再構成し、再適用を決定論的にする。
+  z.object({ type: z.literal("replaceDeckSlides"), title: z.string().min(1).max(160), slides: z.array(SlideSchema).min(1).max(30) }),
 ]);
 export type Operation = z.infer<typeof OperationSchema>;
 

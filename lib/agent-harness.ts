@@ -269,7 +269,8 @@ export function writeDeck(
 ): ToolResult {
   if (!request.slides.length) throw new DocumentError("スライドを 1 件以上指定してください。");
   const slides = z.array(SlideBlueprintSchema).min(1).max(12).parse(request.slides);
-  const operation: Operation = { type: "replaceDeck", title: request.title, slides };
+  const generated = slides.map((blueprint, index) => slideFromBlueprint(blueprint, workingCopy.deck.theme, index));
+  const operation: Operation = { type: "replaceDeckSlides", title: request.title, slides: generated };
   return applyToWorkingCopy(workingCopy, [operation]);
 }
 

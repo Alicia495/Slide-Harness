@@ -64,6 +64,10 @@ export function applyOperations(current: Deck, rawOperations: unknown): Deck {
         deck.title = op.title;
         deck.slides = op.slides.map((bp, i) => slideFromBlueprint(bp, deck.theme, i));
         break;
+      case "replaceDeckSlides":
+        deck.title = op.title;
+        deck.slides = structuredClone(op.slides);
+        break;
       case "addSlide": {
         const index = Math.min(op.index ?? deck.slides.length, deck.slides.length);
         deck.slides.splice(index, 0, slideFromBlueprint(op.slide, deck.theme, index));
@@ -249,9 +253,9 @@ export function isReplayableToolLoopResult(current: Deck, operations: Operation[
 }
 
 export function operationSummaries(operations: Operation[]): string[] {
-  if (operations.some((op) => op.type === "replaceDeck")) return ["プレゼンテーション全体を作成・再構成"];
+  if (operations.some((op) => op.type === "replaceDeck" || op.type === "replaceDeckSlides")) return ["プレゼンテーション全体を作成・再構成"];
   const labels: Record<Operation["type"], string> = {
-    replaceDeck: "全体を再構成", addSlide: "スライドを追加", deleteSlide: "スライドを削除",
+    replaceDeck: "全体を再構成", replaceDeckSlides: "全体を作成", addSlide: "スライドを追加", deleteSlide: "スライドを削除",
     reorderSlide: "スライドを並べ替え", updateText: "文章を変更", moveElement: "要素を移動",
     resizeElement: "要素のサイズを変更", updateStyle: "見た目を変更", updateTable: "表を更新",
     updateChart: "グラフを更新", setTheme: "テーマを変更", addImage: "画像を追加",
