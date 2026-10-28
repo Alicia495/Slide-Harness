@@ -268,7 +268,8 @@ export function writeDeck(
   request: { title: string; slides: SlideBlueprint[] },
 ): ToolResult {
   if (!request.slides.length) throw new DocumentError("スライドを 1 件以上指定してください。");
-  const operation: Operation = { type: "replaceDeck", title: request.title, slides: request.slides };
+  const slides = z.array(SlideBlueprintSchema).min(1).max(12).parse(request.slides);
+  const operation: Operation = { type: "replaceDeck", title: request.title, slides };
   return applyToWorkingCopy(workingCopy, [operation]);
 }
 
