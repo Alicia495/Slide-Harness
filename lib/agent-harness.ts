@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   SLIDE_H,
   SLIDE_W,
@@ -62,6 +63,40 @@ export type LayoutIssue = {
 
 export type PolicyDecision = "auto" | "proposal";
 
+export type VisualInsight = {
+  summary: string;
+  issues: string[];
+  meetsIntent: boolean;
+};
+
+export type RenderFn = (deck: Deck) => Buffer | Promise<Buffer>;
+export type VisionFn = (request: {
+  image: Buffer;
+  slideId: string;
+  intent: string;
+}) => VisualInsight | Promise<VisualInsight>;
+
+export type InspectionDeps = {
+  render: RenderFn;
+  vision: VisionFn;
+};
+
+export type InspectionLimits = {
+  maxRenderCalls?: number;
+  maxVisionCalls?: number;
+  visionSupported?: boolean;
+};
+
+export type InspectionRuntime = {
+  deps: InspectionDeps;
+  maxRenderCalls: number;
+  maxVisionCalls: number;
+  visionSupported: boolean;
+  renderCalls: number;
+  visionCalls: number;
+  renderCache: Map<string, Buffer>;
+};
+
 export type ToolName = "read" | "edit" | "write" | "reflow" | "render" | "inspect" | "commit";
 
 export type ChangeClassification = { tool: ToolName; operations: readonly Operation[] };
@@ -80,6 +115,14 @@ const LINE_SPACING = 1.3;
 const LATIN_EM = 0.55;
 // 装飾 shape / icon は意図的な重なりが多いため重複検査の対象にしない。
 const CONTENT_KINDS: readonly Element["kind"][] = ["text", "table", "chart", "image"];
+const DEFAULT_MAX_RENDER_CALLS = 3;
+const DEFAULT_MAX_VISION_CALLS = 2;
+
+const VisualInsightSchema = z.object({
+  summary: z.string().max(600),
+  issues: z.array(z.string().max(400)).max(8),
+  meetsIntent: z.boolean(),
+});
 
 export function createWorkingCopy(deck: Deck, baseVersion: number): WorkingCopy {
   if (!Number.isInteger(baseVersion) || baseVersion < 0) throw new DocumentError("基準版番号が不正です。");
@@ -108,6 +151,58 @@ export function getSlide(workingCopy: WorkingCopy, slideId: string): Slide {
   const slide = workingCopy.deck.slides.find((item) => item.id === slideId);
   if (!slide) throw new DocumentError("対象のスライドが見つかりません。");
   return structuredClone(slide);
+}
+
+export function createInspectionRuntime(
+  deps: InspectionDeps,
+  limits: InspectionLimits = {},
+): InspectionRuntime {
+  return {
+    deps,
+    maxRenderCalls: positiveInteger(limits.maxRenderCalls ?? DEFAULT_MAX_RENDER_CALLS, "render 上限"),
+    maxVisionCalls: positiveInteger(limits.maxVisionCalls ?? DEFAULT_MAX_VISION_CALLS, "Vision 上限"),
+    visionSupported: limits.visionSupported ?? true,
+    renderCalls: 0,
+    visionCalls: 0,
+    renderCache: new Map(),
+  };
+}
+
+export async function renderSlide(
+  workingCopy: WorkingCopy,
+  slideId: string,
+  runtime: InspectionRuntime,
+): Promise<Buffer> {
+  const slide = getSlide(workingCopy, slideId);
+  const scopedDeck: Deck = { ...structuredClone(workingCopy.deck), slides: [slide] };
+  const cacheKey = JSON.stringify({ theme: scopedDeck.theme, slide });
+  const cached = runtime.renderCache.get(cacheKey);
+  if (cached) return Buffer.from(cached);
+  if (runtime.renderCalls >= runtime.maxRenderCalls) {
+    throw new DocumentError("この実行で許可されたレンダリング回数を超えました。", 429);
+  }
+  runtime.renderCalls += 1;
+  const image = await runtime.deps.render(scopedDeck);
+  if (!Buffer.isBuffer(image)) throw new DocumentError("スライドの画像を生成できませんでした。", 502);
+  runtime.renderCache.set(cacheKey, Buffer.from(image));
+  return Buffer.from(image);
+}
+
+export async function inspectVisual(
+  workingCopy: WorkingCopy,
+  slideId: string,
+  intent: string,
+  runtime: InspectionRuntime,
+): Promise<VisualInsight> {
+  if (!runtime.visionSupported) throw new DocumentError("選択したモデルは Vision 検査に対応していません。", 400);
+  if (runtime.visionCalls >= runtime.maxVisionCalls) {
+    throw new DocumentError("この実行で許可された Vision 検査回数を超えました。", 429);
+  }
+  const normalizedIntent = intent.trim();
+  if (!normalizedIntent) throw new DocumentError("視覚検査の意図を指定してください。");
+  const image = await renderSlide(workingCopy, slideId, runtime);
+  runtime.visionCalls += 1;
+  return VisualInsightSchema.parse(await runtime.deps.vision({ image, slideId, intent: normalizedIntent }));
 }
 
 export function editElements(
@@ -311,6 +406,11 @@ function coordinate(value: number, axis: "x" | "y"): number {
 
 function positive(value: number, label: string): number {
   if (!Number.isFinite(value) || value <= 0) throw new DocumentError(`${label} が不正です。`);
+  return value;
+}
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isInteger(value) || value <= 0) throw new DocumentError(`${label}が不正です。`);
   return value;
 }
 
