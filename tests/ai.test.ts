@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, createToolLoopActivityFeed, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, toolLoopSampling, toolLoopTokenBudget, tokenUsageExceedsBudget, validationFailureMessage, type ModelConfig, type ToolLoopActivityEvent } from "../lib/ai";
+import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, createToolLoopActivityFeed, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, toolLoopSampling, toolLoopTokenBudget, toolLoopWorkflowInstruction, tokenUsageExceedsBudget, validationFailureMessage, type ModelConfig, type ToolLoopActivityEvent } from "../lib/ai";
 import { emptyDeck, type Deck } from "../lib/document";
 import { DocumentError, isSmallAIEdit } from "../lib/operations";
 
@@ -222,6 +222,16 @@ describe("Tool loop system prompt", () => {
     const lower = TOOL_LOOP_SYSTEM_PROMPT.toLowerCase();
     expect(lower).toContain("never");
     expect(lower).toContain("javascript");
+  });
+
+  it("directs deck creation through the write_deck tool", () => {
+    expect(TOOL_LOOP_SYSTEM_PROMPT).toContain("write_deck");
+  });
+
+  it("instructs an empty deck run to create the deck with write_deck", () => {
+    const instruction = toolLoopWorkflowInstruction(emptyDeck("空の資料"));
+    expect(instruction).toContain("write_deck");
+    expect(toolLoopWorkflowInstruction(deckWithSlide("表紙"))).not.toContain("write_deck");
   });
 
   it("does not reuse the JSON-in-prompt operations contract", () => {
