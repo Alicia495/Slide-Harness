@@ -150,6 +150,16 @@
 .chat-message.is-pending .message-body{opacity:.65}
 .chat-elapsed{margin-left:auto;font-size:10px;color:#8a97ab;font-variant-numeric:tabular-nums}
 .ai-thinking{display:flex;align-items:center;gap:8px}
+.chat-activity{display:flex;flex-direction:column;gap:4px;border:1px solid #e2e8f2;border-radius:9px;background:#f8fafd;padding:8px 10px;max-height:168px;overflow-y:auto;font-size:10.5px;color:#516072}
+.chat-activity-item{display:flex;align-items:flex-start;gap:6px;line-height:1.55}
+.chat-activity-item svg{flex:none;margin-top:2px;color:#8a97ab}
+.chat-activity-step{font-weight:800;font-size:9.5px;letter-spacing:.05em;color:#64738a;font-variant-numeric:tabular-nums}
+.chat-activity-item.is-step{margin-top:3px}
+.chat-activity-tool{font-weight:700;color:#40506a}
+.chat-activity-tool.is-commit{color:var(--blue)}
+.chat-activity-detail{display:block;margin-top:1px;font-size:9.5px;color:#7d8aa0;font-weight:500;word-break:break-all}
+.chat-activity-reasoning{color:#617084;word-break:break-word}
+.chat-activity-text{color:#40506a;word-break:break-word}
 .proposal-footer-info{min-width:0}
 .proposal-preview{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap}
 .proposal-thumb{position:relative;border:1px solid #d5deef;border-radius:7px;padding:0;background:#fff;overflow:hidden;flex:none}

@@ -130,6 +130,40 @@ function phaseLabel(status: ChatStatus | null, mode: "plan" | "build"): string {
   }
 }
 
+// ツールループの実行中に飛来する activity イベントを、実行中フィードの行へ変換する。
+type ChatActivityItem =
+  | { key: string; kind: "step"; step: number }
+  | { key: string; kind: "reasoning" | "text"; text: string }
+  | { key: string; kind: "tool"; tool: string; status: "start" | "result" | "error"; args?: string; summary?: string };
+
+function applyChatActivity(items: ChatActivityItem[], evt: Record<string, unknown>): ChatActivityItem[] {
+  const kind = String(evt.kind ?? "");
+  if (kind === "step") return [...items, { key: `step-${String(evt.step)}`, kind: "step", step: Number(evt.step) }];
+  if (kind === "tool") {
+    const callId = String(evt.callId ?? "");
+    const status = String(evt.status ?? "start");
+    const summary = typeof evt.summary === "string" ? evt.summary : undefined;
+    for (let index = items.length - 1; index >= 0; index--) {
+      const item = items[index];
+      if (item.kind === "tool" && item.key === callId && item.status === "start") {
+        const next = [...items];
+        next[index] = { ...item, status: status === "error" ? "error" : "result", summary };
+        return next;
+      }
+    }
+    return [...items, { key: callId, kind: "tool", tool: String(evt.tool ?? ""), status: "start", args: typeof evt.args === "string" ? evt.args : undefined }];
+  }
+  if (kind === "reasoning" || kind === "text") {
+    const chunk = String(evt.text ?? "");
+    const last = items[items.length - 1];
+    if (last && (last.kind === "reasoning" || last.kind === "text") && last.kind === kind) {
+      return [...items.slice(0, -1), { key: last.key, kind: last.kind, text: last.text + chunk }];
+    }
+    return [...items, { key: `${kind}-${String(items.length)}`, kind, text: chunk }];
+  }
+  return items;
+}
+
 function elementColor(el: Element): string | undefined {
   if (el.kind === "shape") return el.fill;
   if (el.kind === "text" || el.kind === "icon") return el.color;
@@ -169,6 +203,7 @@ export function Editor({ projectId }: { projectId: string }) {
   const [templates, setTemplates] = useState<{ id: string; name: string; theme: Theme }[]>([]);
   const [showPlan, setShowPlan] = useState(false);
   const chatEnd = useRef<HTMLDivElement>(null);
+  const chatActivityEnd = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragSlide = useRef<string | null>(null);
   const commitInFlight = useRef(false);
@@ -176,6 +211,7 @@ export function Editor({ projectId }: { projectId: string }) {
   const [retryOps, setRetryOps] = useState<Operation[] | null>(null);
   const [isNarrow, setIsNarrow] = useState(false);
   const [chatStatus, setChatStatus] = useState<ChatStatus | null>(null);
+  const [chatActivity, setChatActivity] = useState<ChatActivityItem[]>([]);
   const [chatElapsed, setChatElapsed] = useState(0);
   const [proposalPreview, setProposalPreview] = useState<{ id: string; slides: string[] } | null>(null);
   const [chatWidth, setChatWidth] = useState(348);
@@ -210,6 +246,7 @@ export function Editor({ projectId }: { projectId: string }) {
     try { window.localStorage.setItem(`slide-harness:model:${projectId}`, modelId); } catch { /* プライベートモード等では無視 */ }
   }, [modelId, projectId]);
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages, busy]);
+  useEffect(() => { chatActivityEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [chatActivity]);
   useEffect(() => {
     if (!busy) return;
     setChatElapsed(0);
@@ -302,7 +339,7 @@ export function Editor({ projectId }: { projectId: string }) {
     const pendingId = `pending-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     // 送信内容をサーバー完了を待たず即座にチャット欄へ表示する(楽観表示)。
     setMessages((prev) => [...prev, { id: pendingId, role: "user" as const, content: message, metadata: { pending: true }, createdAt: new Date().toISOString() }]);
-    setBusy(true); setChatStatus({ phase: "sending" }); setError(""); setNotice(""); setPrompt("");
+    setBusy(true); setChatStatus({ phase: "sending" }); setChatActivity([]); setError(""); setNotice(""); setPrompt("");
     const controller = new AbortController();
     chatAbort.current = controller;
     const removePending = () => setMessages((prev) => prev.filter((item) => item.id !== pendingId));
@@ -333,6 +370,7 @@ export function Editor({ projectId }: { projectId: string }) {
           if (!line.trim()) continue;
           const evt = JSON.parse(line) as Record<string, unknown>;
           if (evt.type === "phase") setChatStatus({ phase: String(evt.phase), attempt: typeof evt.attempt === "number" ? evt.attempt : undefined, tool: typeof evt.tool === "string" ? evt.tool : undefined, status: typeof evt.status === "string" ? evt.status : undefined });
+          else if (evt.type === "activity") setChatActivity((items) => applyChatActivity(items, evt));
           else if (evt.type === "result") result = evt;
           else if (evt.type === "error") throw new ApiError(String(evt.error || "AI 処理に失敗しました。"), Number(evt.status || 500));
         }
@@ -363,7 +401,7 @@ export function Editor({ projectId }: { projectId: string }) {
         if (reason instanceof ApiError && reason.status === 409) setNotice("他の変更が先に保存されたため、最新の状態を読み込みました。");
         await load().catch(() => undefined);
       }
-    } finally { setBusy(false); setChatStatus(null); chatAbort.current = null; }
+    } finally { setBusy(false); setChatStatus(null); setChatActivity([]); chatAbort.current = null; }
   }
 
   function cancelChat() {
@@ -769,6 +807,18 @@ export function Editor({ projectId }: { projectId: string }) {
           </>; })()}</div>}{message.role === "assistant" && message.metadata.mode === "chat" && <div className="message-action"><MessageSquare size={14}/>会話の回答</div>}</div>
           </div>)}
           {busy && <div className="chat-message from-assistant" role="status"><span className="message-avatar"><Sparkles size={13}/></span><div className="message-body ai-thinking"><Loader2 className="spin" size={16}/><span>{phaseLabel(chatStatus, chatMode)}</span>{chatElapsed >= 5 && <span className="chat-elapsed">{chatElapsed}s</span>}</div></div>}
+          {busy && !!chatActivity.length && <div className="chat-activity">
+            {chatActivity.map((item) => <div key={item.key} className={`chat-activity-item is-${item.kind}`}>
+              {item.kind === "step" && <span className="chat-activity-step">STEP {item.step}</span>}
+              {item.kind === "tool" && <>
+                {item.status === "start" ? <Loader2 className="spin" size={12}/> : item.status === "result" ? <CircleCheck size={12}/> : <CircleAlert size={12}/>}
+                <span className={`chat-activity-tool${item.tool.startsWith("commit_") ? " is-commit" : ""}`}>{toolPhaseLabel(item.tool)}{(item.args || item.summary) && <code className="chat-activity-detail">{String(item.args ?? item.summary ?? "").replace(/\s+/g, " ").slice(0, 140)}</code>}</span>
+              </>}
+              {item.kind === "reasoning" && <span className="chat-activity-reasoning">AI の思考: …{item.text.slice(-180)}</span>}
+              {item.kind === "text" && <span className="chat-activity-text">…{item.text.slice(-120)}</span>}
+            </div>)}
+            <div ref={chatActivityEnd}/>
+          </div>}
           <div ref={chatEnd}/>
         </div>
         <form className="chat-composer" onSubmit={sendChat}>
