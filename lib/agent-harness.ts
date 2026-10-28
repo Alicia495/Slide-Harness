@@ -693,8 +693,8 @@ export function consumeAgentStep(budget: AgentRunBudget): void {
   budget.stepsUsed += 1;
 }
 
-export function isToolLoopEnabled(env: Record<string, string | undefined>, deck: Deck): boolean {
-  return env.AI_TOOL_LOOP_ENABLED === "true" && deck.slides.length > 0;
+export function isToolLoopEnabled(env: Record<string, string | undefined>, _deck: Deck): boolean {
+  return env.AI_TOOL_LOOP_ENABLED === "true";
 }
 
 // write / reflow は常に proposal。同一 slide の要素編集のみ auto を許す。

@@ -69,7 +69,7 @@ export type PhaseReporter = (phase: AIPhase, detail?: { attempt?: number; tool?:
 
 export type AIGenerationMode = "tool-loop" | "legacy";
 
-// ツールループはフラグ有効かつ既存資料があるときのみ。空 Deck の初回作成は legacy のまま。
+// ツールループはフラグ有効時に使用する。空 Deck の初回作成も write_deck で扱う。
 export function selectAIGenerationMode(env: Record<string, string | undefined>, deck: Deck): AIGenerationMode {
   return isToolLoopEnabled(env, deck) ? "tool-loop" : "legacy";
 }
