@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, toolLoopTokenBudget, tokenUsageExceedsBudget, validationFailureMessage, type ModelConfig } from "../lib/ai";
+import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, createToolLoopActivityFeed, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, selectAIGenerationMode, toolLoopSampling, toolLoopTokenBudget, tokenUsageExceedsBudget, validationFailureMessage, type ModelConfig, type ToolLoopActivityEvent } from "../lib/ai";
 import { emptyDeck, type Deck } from "../lib/document";
 import { DocumentError, isSmallAIEdit } from "../lib/operations";
 
@@ -264,5 +264,103 @@ describe("Tool loop token budget", () => {
 
   it("treats missing provider usage as zero without failing", () => {
     expect(tokenUsageExceedsBudget([{ usage: { totalTokens: undefined } }], 1)).toBe(false);
+  });
+});
+
+function collectFeed(): { events: ToolLoopActivityEvent[]; push: (part: Parameters<ReturnType<typeof createToolLoopActivityFeed>["onPart"]>[0]) => void; flush: () => void } {
+  const events: ToolLoopActivityEvent[] = [];
+  const feed = createToolLoopActivityFeed((event) => events.push(event));
+  return { events, push: (part) => feed.onPart(part), flush: () => feed.flush() };
+}
+
+describe("Tool loop activity feed", () => {
+  it("emits numbered step events for each model step", () => {
+    const { events, push } = collectFeed();
+    push({ type: "start-step" });
+    push({ type: "start-step" });
+    expect(events).toEqual([{ kind: "step", step: 1 }, { kind: "step", step: 2 }]);
+  });
+
+  it("emits tool start with truncated args and result with summary for the same call id", () => {
+    const { events, push } = collectFeed();
+    push({ type: "tool-call", toolCallId: "call-1", toolName: "edit_elements", input: { slideId: "s-1", edits: [{ elementId: "e-1", text: "あ".repeat(500) }] } });
+    push({ type: "tool-result", toolCallId: "call-1", toolName: "edit_elements", output: { applied: 1 } });
+    expect(events).toHaveLength(2);
+    const [start, result] = events;
+    expect(start.kind === "tool" && start.status).toBe("start");
+    expect(start.kind === "tool" && start.args).toContain("slideId");
+    expect(start.kind === "tool" && (start.args ?? "").length).toBeLessThanOrEqual(400);
+    expect(result.kind === "tool" && result.status).toBe("result");
+    expect(result.kind === "tool" && result.summary).toBe('{"applied":1}');
+  });
+
+  it("emits tool errors with the failure summary", () => {
+    const { events, push } = collectFeed();
+    push({ type: "tool-error", toolCallId: "call-9", toolName: "render_slide", error: new Error("描画に失敗しました") });
+    expect(events).toHaveLength(1);
+    expect(events[0].kind === "tool" && events[0].status).toBe("error");
+    expect(events[0].kind === "tool" && events[0].summary).toContain("描画に失敗しました");
+  });
+
+  it("buffers reasoning deltas and flushes them at reasoning end", () => {
+    const { events, push } = collectFeed();
+    push({ type: "reasoning-delta", text: "まず" });
+    push({ type: "reasoning-delta", text: "対象を見る" });
+    expect(events).toHaveLength(0);
+    push({ type: "reasoning-end" });
+    expect(events).toEqual([{ kind: "reasoning", text: "まず対象を見る" }]);
+  });
+
+  it("flushes long reasoning buffers without waiting for the end boundary", () => {
+    const { events, push } = collectFeed();
+    push({ type: "reasoning-delta", text: "あ".repeat(160) });
+    expect(events).toEqual([{ kind: "reasoning", text: "あ".repeat(160) }]);
+    push({ type: "reasoning-delta", text: "い".repeat(30) });
+    expect(events).toHaveLength(1);
+  });
+
+  it("keeps reasoning and reply text in separate ordered events", () => {
+    const { events, push, flush } = collectFeed();
+    push({ type: "reasoning-delta", text: "考える" });
+    push({ type: "text-delta", text: "返答" });
+    expect(events).toHaveLength(0);
+    flush();
+    expect(events).toEqual([{ kind: "reasoning", text: "考える" }, { kind: "text", text: "返答" }]);
+  });
+
+  it("flushes buffered content before tool events so the feed keeps stream order", () => {
+    const { events, push } = collectFeed();
+    push({ type: "reasoning-delta", text: "次を対象編集" });
+    push({ type: "tool-call", toolCallId: "call-2", toolName: "write_slide", input: { slideId: "s-1" } });
+    expect(events).toEqual([
+      { kind: "reasoning", text: "次を対象編集" },
+      { kind: "tool", status: "start", tool: "write_slide", callId: "call-2", args: '{"slideId":"s-1"}' },
+    ]);
+  });
+
+  it("ignores parts that carry no display activity", () => {
+    const { events, push } = collectFeed();
+    push({ type: "start" });
+    push({ type: "finish-step" });
+    push({ type: "finish" });
+    expect(events).toHaveLength(0);
+  });
+});
+
+describe("Tool loop sampling", () => {
+  it("enables thinking output on vllm so reasoning can be streamed live", () => {
+    expect(toolLoopSampling(profileWith(2048, 32768))).toHaveProperty("providerOptions.vllm.chat_template_kwargs.enable_thinking", true);
+  });
+
+  it("keeps azure sampling free of vllm-specific options", () => {
+    const azure: ModelConfig = {
+      id: "env-azure", label: "A", provider: "azure", modelName: "gpt", baseUrl: "https://x.openai.azure.com/openai/v1",
+      resourceName: "x", apiVersion: "v1", legacyUrls: false, hasApiKey: true,
+      contextWindow: 128000, contextSource: "manual",
+      temperature: 0.2, topP: 1, maxOutputTokens: 4096, managedBy: "environment", visionSupported: true, visionCheckedAt: null,
+    };
+    const sampling = toolLoopSampling(azure);
+    expect(sampling.temperature).toBe(0.2);
+    expect(sampling).not.toHaveProperty("providerOptions.vllm");
   });
 });
