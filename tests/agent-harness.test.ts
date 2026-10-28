@@ -12,14 +12,21 @@ import {
 } from "../lib/document";
 import { applyOperations, DocumentError } from "../lib/operations";
 import {
+  assertAgentTime,
   classifyChanges,
+  consumeAgentStep,
+  createAgentRunBudget,
+  createAgentToolRegistry,
   createInspectionRuntime,
   createWorkingCopy,
   editElements,
+  executeAgentTool,
+  getAgentRunState,
   getDeckSummary,
   getSlide,
   inspectLayout,
   inspectVisual,
+  isToolLoopEnabled,
   renderSlide,
   reflowSlide,
   writeSlide,
@@ -430,5 +437,210 @@ describe("inspect_visual", () => {
     expect(vision.calls).toBe(1);
     expect(workingCopy.deck).toEqual(snapshot);
     expect(workingCopy.operations).toEqual(operationsSnapshot);
+  });
+});
+
+// --- Phase 3A Task 3: AI SDK tool loop と実行予算 (Red: 未実装 API の契約固定) ---
+
+const TOOL_LOOP_TOOL_NAMES = [
+  "get_deck_summary",
+  "get_slide",
+  "edit_elements",
+  "write_slide",
+  "render_slide",
+  "inspect_layout",
+  "inspect_visual",
+  "reflow_slide",
+  "commit_changes",
+] as const;
+
+type ToolEventRecord = { status: "start" | "complete" | "error"; tool: string };
+
+function makeToolEventRecorder(): { events: ToolEventRecord[]; onToolEvent: (event: ToolEventRecord) => void } {
+  const events: ToolEventRecord[] = [];
+  return { events, onToolEvent: (event: ToolEventRecord) => { events.push(event); } };
+}
+
+// context は同一 Working Copy / InspectionRuntime を共有する。実装側が run 状態を this へ付与する。
+function makeToolLoopContext(
+  workingCopy: WorkingCopy,
+  runtime: InspectionRuntime,
+  onToolEvent: (event: ToolEventRecord) => void,
+  budget?: unknown,
+): { [key: string]: unknown } {
+  return budget === undefined ? { workingCopy, runtime, onToolEvent } : { workingCopy, runtime, onToolEvent, budget };
+}
+
+function toolLoopFixture(): {
+  source: Deck;
+  workingCopy: WorkingCopy;
+  render: RenderSpy;
+  vision: VisionSpy;
+  runtime: InspectionRuntime;
+  events: ToolEventRecord[];
+  context: { [key: string]: unknown };
+  registry: Record<string, { inputSchema: unknown; execute: unknown }>;
+  slideId: string;
+} {
+  const source = sampleDeck();
+  const workingCopy = createWorkingCopy(source, 0);
+  const render = makeRenderSpy();
+  const vision = makeVisionSpy();
+  const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn });
+  const { events, onToolEvent } = makeToolEventRecorder();
+  const context = makeToolLoopContext(workingCopy, runtime, onToolEvent);
+  const registry = createAgentToolRegistry(context) as Record<string, { inputSchema: unknown; execute: unknown }>;
+  return { source, workingCopy, render, vision, runtime, events, context, registry, slideId: source.slides[1].id };
+}
+
+describe("tool registry", () => {
+  it("registers exactly the nine planned tools with inputSchema and execute", () => {
+    const { registry } = toolLoopFixture();
+    expect(Object.keys(registry).sort()).toEqual([...TOOL_LOOP_TOOL_NAMES].sort());
+    for (const name of TOOL_LOOP_TOOL_NAMES) {
+      expect(registry[name].inputSchema).toBeDefined();
+      expect(typeof registry[name].execute).toBe("function");
+    }
+  });
+});
+
+describe("shared run state through tools", () => {
+  it("edits made through edit_elements are visible to a later get_slide in the same run", async () => {
+    const f = toolLoopFixture();
+    const before = await executeAgentTool(f.registry, "get_slide", { slideId: f.slideId }) as Deck["slides"][number];
+    const title = titleElement(before);
+    await executeAgentTool(f.registry, "edit_elements", {
+      slideId: f.slideId,
+      patches: [{ elementId: title.id, text: "ツール経由の編集" }],
+    });
+    const after = await executeAgentTool(f.registry, "get_slide", { slideId: f.slideId }) as Deck["slides"][number];
+    const edited = after.elements.find((element) => element.id === title.id);
+    expect(edited?.kind === "text" ? edited.text : null).toBe("ツール経由の編集");
+  });
+
+  it("shares one inspection runtime across render_slide and inspect_visual", async () => {
+    const f = toolLoopFixture();
+    const image = await executeAgentTool(f.registry, "render_slide", { slideId: f.slideId });
+    expect(Buffer.isBuffer(image)).toBe(true);
+    const insight = await executeAgentTool(f.registry, "inspect_visual", { slideId: f.slideId, intent: "タイトルを強調したい" }) as VisualInsight;
+    expect(typeof insight.summary).toBe("string");
+    expect(f.render.calls).toBe(1);
+    expect(f.vision.calls).toBe(1);
+    const issues = await executeAgentTool(f.registry, "inspect_layout", { slideId: f.slideId });
+    expect(Array.isArray(issues)).toBe(true);
+  });
+});
+
+describe("commit_changes", () => {
+  it("flips commitRequested and exposes operations, working deck, policy, and reply", async () => {
+    const f = toolLoopFixture();
+    expect(getAgentRunState(f.context).commitRequested).toBe(false);
+    const slide = getSlide(f.workingCopy, f.slideId);
+    const title = titleElement(slide);
+    await executeAgentTool(f.registry, "edit_elements", {
+      slideId: f.slideId,
+      patches: [{ elementId: title.id, text: "コミット対象" }],
+    });
+    await executeAgentTool(f.registry, "commit_changes", { reply: "更新をコミットします" });
+    const state = getAgentRunState(f.context);
+    expect(state.commitRequested).toBe(true);
+    expect(state.operations.length).toBeGreaterThan(0);
+    expect(state.operations.every((operation: Operation) => OperationSchema.safeParse(operation).success)).toBe(true);
+    expect(state.workingDeck).toEqual(f.workingCopy.deck);
+    expect(state.policy).toBe<PolicyDecision>("auto");
+    expect(state.reply).toBe("更新をコミットします");
+  });
+
+  it("rejects a commit with no changes", async () => {
+    const f = toolLoopFixture();
+    await expect(executeAgentTool(f.registry, "commit_changes", { reply: "変更なし" })).rejects.toThrow();
+    expect(getAgentRunState(f.context).commitRequested).toBe(false);
+  });
+
+  it("classifies a commit after write_slide as proposal", async () => {
+    const f = toolLoopFixture();
+    await executeAgentTool(f.registry, "write_slide", {
+      slideId: f.slideId,
+      blueprint: { layout: "title", title: "書き換え" },
+    });
+    await executeAgentTool(f.registry, "commit_changes", { reply: "書き換えました" });
+    expect(getAgentRunState(f.context).policy).toBe<PolicyDecision>("proposal");
+  });
+
+  it("classifies a commit after reflow_slide as proposal", async () => {
+    const f = toolLoopFixture();
+    const slideId = f.source.slides[2].id;
+    const slide = getSlide(f.workingCopy, slideId);
+    await executeAgentTool(f.registry, "reflow_slide", {
+      slideId,
+      rule: { type: "alignRow", elementIds: slide.elements.map((element) => element.id), y: 2 },
+    });
+    await executeAgentTool(f.registry, "commit_changes", { reply: "整えました" });
+    expect(getAgentRunState(f.context).policy).toBe<PolicyDecision>("proposal");
+  });
+});
+
+describe("tool events", () => {
+  it("emits start and complete events around each tool execute", async () => {
+    const f = toolLoopFixture();
+    await executeAgentTool(f.registry, "get_deck_summary", {});
+    expect(f.events.map((event) => event.status)).toEqual(["start", "complete"]);
+    expect(f.events.every((event) => event.tool === "get_deck_summary")).toBe(true);
+  });
+
+  it("emits an error event when a tool execution fails", async () => {
+    const source = sampleDeck();
+    const workingCopy = createWorkingCopy(source, 0);
+    const render = makeRenderSpy(new Error("render 失敗"));
+    const vision = makeVisionSpy();
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn });
+    const { events, onToolEvent } = makeToolEventRecorder();
+    const context = makeToolLoopContext(workingCopy, runtime, onToolEvent);
+    const registry = createAgentToolRegistry(context);
+    await expect(executeAgentTool(registry, "render_slide", { slideId: source.slides[1].id })).rejects.toThrow("render 失敗");
+    expect(events.some((event) => event.status === "start" && event.tool === "render_slide")).toBe(true);
+    expect(events.some((event) => event.status === "error" && event.tool === "render_slide")).toBe(true);
+    expect(events.some((event) => event.status === "complete" && event.tool === "render_slide")).toBe(false);
+  });
+});
+
+describe("agent run budget", () => {
+  it("stops after the step budget is consumed", () => {
+    const budget = createAgentRunBudget({ maxSteps: 2, maxDurationMs: 10000, now: () => 0 });
+    expect(() => consumeAgentStep(budget)).not.toThrow();
+    expect(() => consumeAgentStep(budget)).not.toThrow();
+    expect(() => consumeAgentStep(budget)).toThrow(/step|ステップ|予算/i);
+  });
+
+  it("stops when the injected clock exceeds the time budget", () => {
+    let clock = 0;
+    const budget = createAgentRunBudget({ maxSteps: 10, maxDurationMs: 1000, now: () => clock });
+    expect(() => assertAgentTime(budget)).not.toThrow();
+    clock = 1500;
+    expect(() => assertAgentTime(budget)).toThrow(/time|時間|予算/i);
+  });
+
+  it("stops tool execution once the registry run budget is exceeded", async () => {
+    const source = sampleDeck();
+    const workingCopy = createWorkingCopy(source, 0);
+    const render = makeRenderSpy();
+    const vision = makeVisionSpy();
+    const runtime = createInspectionRuntime({ render: render.fn, vision: vision.fn });
+    const { events, onToolEvent } = makeToolEventRecorder();
+    const budget = createAgentRunBudget({ maxSteps: 1, maxDurationMs: 10000, now: () => 0 });
+    const context = makeToolLoopContext(workingCopy, runtime, onToolEvent, budget);
+    const registry = createAgentToolRegistry(context);
+    await executeAgentTool(registry, "get_deck_summary", {});
+    await expect(executeAgentTool(registry, "get_slide", { slideId: source.slides[1].id })).rejects.toThrow(/step|ステップ|予算/i);
+  });
+});
+
+describe("tool loop feature flag", () => {
+  it("enables the tool loop only with the flag and an existing slide", () => {
+    const deck = sampleDeck();
+    expect(isToolLoopEnabled({ AI_TOOL_LOOP_ENABLED: "true" }, deck)).toBe(true);
+    expect(isToolLoopEnabled({ AI_TOOL_LOOP_ENABLED: "false" }, deck)).toBe(false);
+    expect(isToolLoopEnabled({}, deck)).toBe(false);
+    expect(isToolLoopEnabled({ AI_TOOL_LOOP_ENABLED: "true" }, emptyDeck("空の資料"))).toBe(false);
   });
 });

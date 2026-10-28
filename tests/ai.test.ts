@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, buildDemoPlan, clampReply, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, validationFailureMessage, type ModelConfig } from "../lib/ai";
+import { DECK_CONTEXT_LIMIT, PLAN_SYSTEM_PROMPT, REPLY_MAX, SYSTEM_PROMPT, TOOL_LOOP_SYSTEM_PROMPT, buildDemoPlan, clampReply, deckContext, generationOutputTokens, normalizeReply, parseVisionProbe, planRepairFeedback, repairFeedback, validationFailureMessage, type ModelConfig } from "../lib/ai";
 import { emptyDeck, type Deck } from "../lib/document";
 import { DocumentError, isSmallAIEdit } from "../lib/operations";
 
@@ -195,5 +195,37 @@ describe("Agentic repair feedback", () => {
   it("detects a stalled model reply that repeats itself", () => {
     expect(normalizeReply('{"reply": "a",\n "operations":[]}')).toBe(normalizeReply('{"reply": "a", "operations":[]}'));
     expect(normalizeReply("a") === normalizeReply("b")).toBe(false);
+  });
+});
+
+describe("Tool loop system prompt", () => {
+  it("requires reading the slide before editing it", () => {
+    const lower = TOOL_LOOP_SYSTEM_PROMPT.toLowerCase();
+    expect(lower).toContain("read");
+    expect(lower.indexOf("read")).toBeLessThan(lower.indexOf("edit"));
+  });
+
+  it("requires an explicit commit tool call before changes apply", () => {
+    expect(TOOL_LOOP_SYSTEM_PROMPT).toContain("commit_changes");
+    const lower = TOOL_LOOP_SYSTEM_PROMPT.toLowerCase();
+    expect(lower).toContain("commit");
+  });
+
+  it("directs the model to use layout and visual inspection tools", () => {
+    const lower = TOOL_LOOP_SYSTEM_PROMPT.toLowerCase();
+    expect(lower).toContain("inspect");
+    expect(TOOL_LOOP_SYSTEM_PROMPT).toContain("inspect_layout");
+    expect(TOOL_LOOP_SYSTEM_PROMPT).toContain("inspect_visual");
+  });
+
+  it("forbids arbitrary code execution", () => {
+    const lower = TOOL_LOOP_SYSTEM_PROMPT.toLowerCase();
+    expect(lower).toContain("never");
+    expect(lower).toContain("javascript");
+  });
+
+  it("does not reuse the JSON-in-prompt operations contract", () => {
+    expect(TOOL_LOOP_SYSTEM_PROMPT).not.toContain('"operations":[');
+    expect(TOOL_LOOP_SYSTEM_PROMPT).not.toBe(SYSTEM_PROMPT);
   });
 });
