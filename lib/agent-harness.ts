@@ -487,7 +487,13 @@ export const AGENT_TOOL_NAMES = [
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
 
-export type ToolEventRecord = { status: "start" | "complete" | "error"; tool: string };
+export type ToolEventRecord = {
+  status: "start" | "complete" | "error";
+  tool: string;
+  slideId?: string;
+  operationCount?: number;
+  policy?: PolicyDecision;
+};
 export type ToolEventReporter = (event: ToolEventRecord) => void;
 
 // 1 実行あたりの予算。now は注入式時計で、時間判定を決定的にする。
@@ -758,18 +764,27 @@ function summarizeToolResult(toolName: AgentToolName, result: unknown): Record<s
 
 async function invokeAgentTool(record: RunRecord, toolName: AgentToolName, input: Record<string, unknown>): Promise<unknown> {
   const { context, state } = record;
-  context.onToolEvent?.({ status: "start", tool: toolName });
+  const slideId = typeof input.slideId === "string" ? input.slideId : undefined;
+  context.onToolEvent?.({ status: "start", tool: toolName, slideId });
   try {
     if (context.budget) consumeAgentStep(context.budget);
     const result = await rawToolHandlersByTool[toolName](input, record);
     if (!state.toolsUsed.includes(toolName)) state.toolsUsed.push(toolName);
-    context.onToolEvent?.({ status: "complete", tool: toolName });
+    const applied = ToolResultSchema.safeParse(result);
+    const committed = CommitResultSchema.safeParse(result);
+    context.onToolEvent?.({
+      status: "complete",
+      tool: toolName,
+      slideId,
+      operationCount: applied.success ? applied.data.operations.length : committed.success ? committed.data.operationCount : undefined,
+      policy: committed.success ? committed.data.policy : undefined,
+    });
     return result;
   } catch (error) {
     if (error instanceof DocumentError && (error.status === 429 || error.status === 504)) {
       state.budgetExhausted = true;
     }
-    context.onToolEvent?.({ status: "error", tool: toolName });
+    context.onToolEvent?.({ status: "error", tool: toolName, slideId });
     throw error;
   }
 }

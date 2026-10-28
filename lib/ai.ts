@@ -466,8 +466,8 @@ function reportToolEvent(onPhase: PhaseReporter | undefined, event: ToolEventRec
   if (event.status === "start") startedAt.set(event.tool, Date.now());
   const started = startedAt.get(event.tool);
   const durationMs = started === undefined ? 0 : Date.now() - started;
-  // 秘密や文面をログへ出さず、ツール名・状態・所要時間だけを構造化して残す。
-  console.log(`[ai] tool=${event.tool} status=${event.status} durationMs=${durationMs}`);
+  // 秘密や文面をログへ出さず、対象 ID と件数だけを構造化して残す。
+  console.log(`[ai] tool=${event.tool} status=${event.status} durationMs=${durationMs} slideId=${event.slideId ?? "-"} operationCount=${event.operationCount ?? 0} policy=${event.policy ?? "-"}`);
   onPhase?.("tool", { tool: event.tool, status: event.status });
   if (event.status !== "start") startedAt.delete(event.tool);
 }
