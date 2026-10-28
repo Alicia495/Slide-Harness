@@ -263,6 +263,15 @@ export function writeSlide(
   return applyToWorkingCopy(workingCopy, [operation]);
 }
 
+export function writeDeck(
+  workingCopy: WorkingCopy,
+  request: { title: string; slides: SlideBlueprint[] },
+): ToolResult {
+  if (!request.slides.length) throw new DocumentError("スライドを 1 件以上指定してください。");
+  const operation: Operation = { type: "replaceDeck", title: request.title, slides: request.slides };
+  return applyToWorkingCopy(workingCopy, [operation]);
+}
+
 export function reflowSlide(
   workingCopy: WorkingCopy,
   slideId: string,
@@ -478,6 +487,7 @@ export const AGENT_TOOL_NAMES = [
   "get_slide",
   "edit_elements",
   "write_slide",
+  "write_deck",
   "render_slide",
   "inspect_layout",
   "inspect_visual",
@@ -584,6 +594,7 @@ const toolInputSchemas = {
   get_slide: z.object({ slideId: z.uuid() }),
   edit_elements: z.object({ slideId: z.uuid(), patches: z.array(ElementPatchSchema).min(1).max(TOOL_PATCH_MAX) }),
   write_slide: z.object({ slideId: z.uuid(), blueprint: SlideBlueprintSchema }),
+  write_deck: z.object({ title: z.string().trim().min(1).max(200), slides: z.array(SlideBlueprintSchema).min(1).max(12) }),
   render_slide: z.object({ slideId: z.uuid() }),
   inspect_layout: z.object({ slideId: z.uuid() }),
   inspect_visual: z.object({ slideId: z.uuid(), intent: z.string().trim().min(1).max(500) }),
@@ -689,7 +700,7 @@ export function isToolLoopEnabled(env: Record<string, string | undefined>, deck:
 // write / reflow は常に proposal。同一 slide の要素編集のみ auto を許す。
 function commitPolicy(record: RunRecord): PolicyDecision {
   const { toolsUsed } = record.state;
-  if (toolsUsed.includes("write_slide") || toolsUsed.includes("reflow_slide")) return "proposal";
+  if (toolsUsed.includes("write_slide") || toolsUsed.includes("write_deck") || toolsUsed.includes("reflow_slide")) return "proposal";
   return classifyChanges({ tool: "edit", operations: record.context.workingCopy.operations });
 }
 
@@ -706,6 +717,10 @@ const rawToolHandlersByTool: Record<AgentToolName, RawToolHandler> = {
   write_slide: async (input, record) => {
     const { slideId, blueprint } = toolInputSchemas.write_slide.parse(input);
     return writeSlide(record.context.workingCopy, slideId, blueprint);
+  },
+  write_deck: async (input, record) => {
+    const { title, slides } = toolInputSchemas.write_deck.parse(input);
+    return writeDeck(record.context.workingCopy, { title, slides });
   },
   render_slide: async (input, record) => {
     const { slideId } = toolInputSchemas.render_slide.parse(input);
@@ -747,6 +762,7 @@ function summarizeToolResult(toolName: AgentToolName, result: unknown): Record<s
       return { slide: SlideSchema.parse(result) };
     case "edit_elements":
     case "write_slide":
+    case "write_deck":
     case "reflow_slide": {
       const applied = ToolResultSchema.parse(result);
       return { operations: applied.operations, changeKinds: applied.changeKinds };
@@ -817,6 +833,11 @@ export function createAgentToolRegistry(context: unknown): AgentToolRegistry {
       description: "Replace the whole target slide with a slide blueprint. Requires an approved layout choice.",
       inputSchema: toolInputSchemas.write_slide,
       execute: async (input) => summarizeToolResult("write_slide", await invokeAgentTool(record, "write_slide", input)),
+    }),
+    write_deck: tool({
+      description: "Compose the entire deck from slide blueprints. Use it to create a new deck when the deck has no slides; it replaces every slide and is saved as a proposal.",
+      inputSchema: toolInputSchemas.write_deck,
+      execute: async (input) => summarizeToolResult("write_deck", await invokeAgentTool(record, "write_deck", input)),
     }),
     render_slide: tool({
       description: "Render the target slide to an image. Returns only a rendered flag and byte length.",
