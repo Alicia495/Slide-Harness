@@ -553,10 +553,12 @@ describe("commit_changes", () => {
     expect(state.reply).toBe("更新をコミットします");
   });
 
-  it("rejects a commit with no changes", async () => {
+  it("records a commit intent with no current changes so same-step edits can finish", async () => {
     const f = toolLoopFixture();
-    await expect(executeAgentTool(f.registry, "commit_changes", { reply: "変更なし" })).rejects.toThrow();
-    expect(getAgentRunState(f.context).commitRequested).toBe(false);
+    await expect(executeAgentTool(f.registry, "commit_changes", { reply: "変更を確定" })).resolves.toBeDefined();
+    const state = finalizeAgentRunState(f.context);
+    expect(state.commitRequested).toBe(true);
+    expect(state.operations).toHaveLength(0);
   });
 
   it("classifies a commit after write_slide as proposal", async () => {
@@ -645,11 +647,11 @@ describe("run finalization", () => {
     const title = titleElement(slide);
     const body = slide.elements.find((element) => element.kind === "text" && element.role === "body");
     if (!body || body.kind !== "text") throw new Error("missing body element");
+    await executeAgentTool(f.registry, "commit_changes", { reply: "更新しました" });
     await executeAgentTool(f.registry, "edit_elements", {
       slideId: f.slideId,
       patches: [{ elementId: title.id, text: "先の編集" }],
     });
-    await executeAgentTool(f.registry, "commit_changes", { reply: "更新しました" });
     await executeAgentTool(f.registry, "edit_elements", {
       slideId: f.slideId,
       patches: [{ elementId: body.id, text: "同一stepで完了した編集" }],
