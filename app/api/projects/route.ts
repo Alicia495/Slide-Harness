@@ -9,7 +9,7 @@ export async function GET() {
 }
 export async function POST(request: Request) {
   try {
-    const body = z.object({ title: z.string().max(160).optional() }).parse(await request.json());
-    return Response.json({ project: await createProject(body.title) }, { status: 201 });
+    const body = z.object({ title: z.string().max(160).optional(), templateId: z.uuid().optional() }).parse(await request.json());
+    return Response.json({ project: await createProject(body.title, body.templateId) }, { status: 201 });
   } catch (error) { return apiError(error); }
 }

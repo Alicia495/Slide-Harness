@@ -6,6 +6,6 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   try {
     const { modelId } = z.object({ modelId: z.string().min(1).max(80) }).parse(await request.json());
-    return Response.json({ ok: true, reply: await testModelConnection(modelId) });
+    return Response.json({ ok: true, ...(await testModelConnection(modelId)) });
   } catch (error) { return apiError(error); }
 }

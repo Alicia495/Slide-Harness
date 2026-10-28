@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { db, LOCAL_USER_ID } from "./db";
+import { type Operation } from "./document";
 import { DocumentError } from "./operations";
 
 export type AssetRecord = { id: string; projectId: string; originalName: string; mimeType: string; sizeBytes: number; storagePath: string };
@@ -20,10 +21,16 @@ export async function saveAsset(projectId: string, file: File): Promise<AssetRec
   await writeFile(storagePath, bytes, { flag: "wx" });
   const mimeType = isPng ? "image/png" : "image/jpeg";
   const asset: AssetRecord = { id, projectId, originalName: file.name.slice(0, 200), mimeType, sizeBytes: bytes.length, storagePath };
-  await db().query(
-    "INSERT INTO assets(id,project_id,created_by_user_id,original_name,mime_type,size_bytes,storage_path) VALUES($1,$2,$3,$4,$5,$6,$7)",
-    [id, projectId, LOCAL_USER_ID, asset.originalName, mimeType, bytes.length, storagePath],
-  );
+  try {
+    await db().query(
+      "INSERT INTO assets(id,project_id,created_by_user_id,original_name,mime_type,size_bytes,storage_path) VALUES($1,$2,$3,$4,$5,$6,$7)",
+      [id, projectId, LOCAL_USER_ID, asset.originalName, mimeType, bytes.length, storagePath],
+    );
+  } catch (reason) {
+    // DB 登録に失敗したらファイルだけの取り残しを作らない。
+    await rm(storagePath, { force: true }).catch(() => undefined);
+    throw reason;
+  }
   return asset;
 }
 
@@ -40,6 +47,14 @@ export async function readAsset(id: string): Promise<{ bytes: Buffer; mimeType: 
   const asset = await getAsset(id);
   if (!asset) return null;
   return { bytes: await readFile(asset.storagePath), mimeType: asset.mimeType };
+}
+
+// applyOperations を純粋に保つため、addImage の assetId 実在と資料所属は commit 境界で検証する。
+export async function assertImagesForProject(projectId: string, operations: Operation[]): Promise<void> {
+  const assetIds = new Set(operations.filter((op) => op.type === "addImage").map((op) => op.assetId));
+  for (const assetId of assetIds) {
+    if (!(await getAsset(assetId, projectId))) throw new DocumentError("追加する画像がこの資料に見つかりません。", 400);
+  }
 }
 
 export async function assetPathsForProject(projectId: string): Promise<Map<string, string>> {

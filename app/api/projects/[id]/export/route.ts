@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assetPathsForProject, DATA_DIR } from "@/lib/assets";
-import { db } from "@/lib/db";
+import { transaction } from "@/lib/db";
 import { apiError, requireUuid } from "@/lib/http";
 import { buildPptx } from "@/lib/pptx";
 import { getProject } from "@/lib/projects";
@@ -16,10 +16,14 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     const bytes = await buildPptx(project.deck, await assetPathsForProject(id));
     const dir = path.join(DATA_DIR, "exports", id);
     await mkdir(dir, { recursive: true });
+    // 版ごとに固定ファイルへ上書きし、exports 履歴は同じ版の行を差し替えてファイル数の無制限増を防ぐ。
     const exportId = crypto.randomUUID();
-    const filePath = path.join(dir, `${exportId}.pptx`);
-    await writeFile(filePath, bytes, { flag: "wx" });
-    await db().query("INSERT INTO exports(id,project_id,document_version,storage_path) VALUES($1,$2,$3,$4)", [exportId, id, project.version, filePath]);
+    const filePath = path.join(dir, `v${project.version}.pptx`);
+    await writeFile(filePath, bytes, { flag: "w" });
+    await transaction(async (client) => {
+      await client.query("DELETE FROM exports WHERE project_id = $1 AND document_version = $2", [id, project.version]);
+      await client.query("INSERT INTO exports(id,project_id,document_version,storage_path) VALUES($1,$2,$3,$4)", [exportId, id, project.version, filePath]);
+    });
     const fileName = encodeURIComponent(`${project.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)}.pptx`);
     return new Response(new Uint8Array(bytes), { headers: {
       "Content-Type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",

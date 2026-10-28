@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { generateOperations } from "@/lib/ai";
+import { generateOperations, generatePlan } from "@/lib/ai";
 import { apiError, requireUuid } from "@/lib/http";
-import { DocumentError, isSmallAIEdit } from "@/lib/operations";
+import { DocumentError, isSmallAIEdit, operationSummaries } from "@/lib/operations";
 import { addMessage, commitOperations, createProposal, getPendingProposal, getProject } from "@/lib/projects";
 
 export const runtime = "nodejs";
@@ -12,22 +12,35 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       baseVersion: z.number().int().nonnegative(),
       prompt: z.string().trim().min(1).max(4000),
       modelId: z.string().min(1).max(80),
+      mode: z.enum(["plan", "build"]).default("build"),
       target: z.object({ slideId: z.uuid().optional(), elementId: z.uuid().optional() }).optional(),
     }).parse(await request.json());
     const project = await getProject(id);
     if (!project) throw new DocumentError("資料が見つかりません。", 404);
     if (project.version !== body.baseVersion) throw new DocumentError("別の変更が先に保存されました。画面を更新してください。", 409);
     if (await getPendingProposal(id)) throw new DocumentError("確認待ちの変更案を先に適用または破棄してください。", 409);
-    const generated = await generateOperations(id, project.deck, body.prompt, body.modelId, body.target);
-    if (isSmallAIEdit(generated.operations)) {
-      const updated = await commitOperations(id, body.baseVersion, generated.operations, "ai");
+    if (body.mode === "plan") {
+      const plan = await generatePlan(id, project.deck, body.prompt, body.modelId);
+      await addMessage(id, "user", body.prompt, { modelId: body.modelId, mode: "plan" });
+      await addMessage(id, "assistant", plan.reply, { mode: "plan", plan: plan.plan });
+      return Response.json({ mode: "plan", reply: plan.reply, plan: plan.plan, compacted: !!plan.compacted });
+    }
+    const generated = await generateOperations(id, project.deck, body.prompt, body.modelId, body.target, project.plan);
+    if (!generated.operations.length) {
       await addMessage(id, "user", body.prompt, { modelId: body.modelId, target: body.target });
-      await addMessage(id, "assistant", generated.reply, { mode: "applied", version: updated.version });
+      await addMessage(id, "assistant", generated.reply, { mode: "chat" });
+      return Response.json({ mode: "chat", reply: generated.reply, compacted: !!generated.compacted });
+    }
+    if (isSmallAIEdit(generated.operations)) {
+      // 単一要素の小修正は Vision レビュー済み Deck を提案にせず即時コミットする(ADR-0001)。
+      const updated = await commitOperations(id, body.baseVersion, generated.operations, "ai", generated.reviewedDeck);
+      await addMessage(id, "user", body.prompt, { modelId: body.modelId, target: body.target });
+      await addMessage(id, "assistant", generated.reply, { mode: "applied", version: updated.version, previousVersion: body.baseVersion, summaries: operationSummaries(generated.operations) });
       return Response.json({ mode: "applied", reply: generated.reply, project: updated, compacted: !!generated.compacted });
     }
-    const proposal = await createProposal(id, body.baseVersion, generated.operations);
+    const proposal = await createProposal(id, body.baseVersion, generated.operations, generated.reviewedDeck);
     await addMessage(id, "user", body.prompt, { modelId: body.modelId, target: body.target });
-    await addMessage(id, "assistant", generated.reply, { mode: "proposal", proposalId: proposal.id });
+    await addMessage(id, "assistant", generated.reply, { mode: "proposal", proposalId: proposal.id, summaries: operationSummaries(generated.operations) });
     return Response.json({ mode: "proposal", reply: generated.reply, proposal, compacted: !!generated.compacted });
   } catch (error) { return apiError(error); }
 }

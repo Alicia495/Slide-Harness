@@ -74,7 +74,11 @@ export default function AISettingsPage() {
   async function test() {
     if (!form.id) return;
     setBusy(true); setError(""); setNotice("接続を確認しています…");
-    try { await api("/api/models/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ modelId: form.id }) }); setNotice("接続できました。"); }
+    try {
+      const data = await api<{ reply: string; visionSupported: boolean }>("/api/models/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ modelId: form.id }) });
+      await load();
+      setNotice(data.visionSupported ? "画像入力と内容認識を確認しました。" : data.reply);
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "接続できませんでした。"); }
     finally { setBusy(false); }
   }
@@ -87,7 +91,7 @@ export default function AISettingsPage() {
       <div className="settings-columns">
         <aside className="settings-list"><div className="settings-list-head"><strong>登録モデル</strong><button type="button" onClick={() => { setForm(emptyForm()); setDiscovered([]); setError(""); }}><Plus size={16}/>追加</button></div>
           {loading ? <p className="settings-empty">読み込んでいます…</p> : models.length ? models.map((model) => <button type="button" key={model.id} className={`settings-model ${(form.sourceId ?? form.id) === model.id ? "active" : ""}`} onClick={() => { setForm(fromProfile(model)); setDiscovered([]); setError(""); }}>
-            <span className="settings-model-mark">{model.provider === "azure" ? "Az" : model.provider === "demo" ? "De" : "AI"}</span><span><strong>{model.label}</strong><small>{model.provider === "azure" ? "Azure OpenAI" : model.provider === "demo" ? "デモ" : "OpenAI 互換"} · {model.contextWindow ? `${model.contextWindow.toLocaleString()} tokens` : "文脈長未設定"}</small></span>
+            <span className="settings-model-mark">{model.provider === "azure" ? "Az" : model.provider === "demo" ? "De" : "AI"}</span><span><strong>{model.label}</strong><small>{model.provider === "azure" ? "Azure OpenAI" : model.provider === "demo" ? "デモ" : "OpenAI 互換"} · {model.contextWindow ? `${model.contextWindow.toLocaleString()} tokens` : "文脈長未設定"} · {model.visionSupported ? "Vision 確認済み" : "Vision 未確認"}</small></span>
           </button>) : <p className="settings-empty">モデルがありません。右側から登録してください。</p>}
         </aside>
         <section className="settings-form-panel">
@@ -111,10 +115,10 @@ export default function AISettingsPage() {
                 <label className="settings-field"><span>Temperature</span><input type="number" min="0" max="2" step="0.1" value={form.temperature} onChange={(e) => update("temperature", Number(e.target.value))}/><small>低いほど結果が安定します。</small></label>
                 <label className="settings-field"><span>Top P</span><input type="number" min="0.01" max="1" step="0.01" value={form.topP} onChange={(e) => update("topP", Number(e.target.value))}/><small>候補トークンの範囲。</small></label>
               </>}
-              <label className="settings-field"><span>最大出力トークン</span><input type="number" min="64" max="32768" value={form.maxOutputTokens} onChange={(e) => update("maxOutputTokens", Number(e.target.value))}/></label>
+              <label className="settings-field"><span>最大出力トークン</span><input type="number" min="64" max="131072" value={form.maxOutputTokens} onChange={(e) => update("maxOutputTokens", Number(e.target.value))}/></label>
             </div>
             <div className="settings-memory"><Database size={18}/><div><strong>会話の記憶</strong><p>推定入力と最大出力がコンテキスト長の80%に達すると、古い会話を時系列の観測記録に変えます。直近の会話と元の履歴は保持し、記録が長くなれば方針・決定・未解決事項を再整理します。</p></div></div>
-            <div className="settings-actions">{form.id && <button type="button" className="button button-ghost" disabled={busy} onClick={test}><Check size={16}/>接続を確認</button>}<button className="button button-primary" type="submit" disabled={busy}>{busy ? <Loader2 size={16} className="spin"/> : <Save size={16}/>}保存する</button></div>
+            <div className="settings-actions">{form.id && <button type="button" className="button button-ghost" disabled={busy} onClick={test}><Check size={16}/>Vision 接続を確認</button>}<button className="button button-primary" type="submit" disabled={busy}>{busy ? <Loader2 size={16} className="spin"/> : <Save size={16}/>}保存する</button></div>
           </form>
         </section>
       </div>

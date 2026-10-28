@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: slide_harness
       POSTGRES_USER: slide_harness
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-slide_harness_local}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required. Use only characters safe in a URL (A-Z a-z 0-9)}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,9 +17,9 @@ services:
   app:
     build: .
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${APP_PORT:-3000}:3000"
+      - "${BIND_HOST:-127.0.0.1}:${APP_PORT:-3000}:3000"
     environment:
-      DATABASE_URL: postgres://slide_harness:${DB_PASSWORD:-slide_harness_local}@db:5432/slide_harness
+      DATABASE_URL: postgres://slide_harness:${DB_PASSWORD:?DB_PASSWORD is required. Use only characters safe in a URL (A-Z a-z 0-9)}@db:5432/slide_harness
       DATA_DIR: /app/data
       AI_SETTINGS_ENCRYPTION_KEY: ${AI_SETTINGS_ENCRYPTION_KEY:-}
       AZURE_OPENAI_RESOURCE: ${AZURE_OPENAI_RESOURCE:-}

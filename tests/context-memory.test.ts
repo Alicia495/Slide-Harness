@@ -17,7 +17,7 @@ import { assembleContext, compactionThreshold, prepareConversationContext, shoul
 const profile: ModelProfile = {
   id: "test", label: "test", provider: "vllm", modelName: "test", baseUrl: "http://localhost/v1", resourceName: "", apiVersion: "",
   legacyUrls: false, hasApiKey: false, contextWindow: 3000, contextSource: "manual", temperature: 0.2, topP: 1,
-  maxOutputTokens: 400, managedBy: "settings",
+  maxOutputTokens: 400, managedBy: "settings", visionSupported: false, visionCheckedAt: null,
 };
 beforeEach(() => { state.messages = []; state.saved = []; });
 

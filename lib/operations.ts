@@ -43,7 +43,10 @@ function validateBounds(deck: Deck): void {
 function refreshPageNumbers(deck: Deck): void {
   deck.slides.forEach((slide, index) => {
     for (const element of slide.elements) {
-      if (element.kind === "text" && element.role === "caption" && /^\d{2}$/.test(element.text)) {
+      if (element.kind !== "text") continue;
+      // 専用 role がある文書は role だけで判定し、role 導入前の旧文書は右下 2 桁 caption だけでページ番号とみなす。
+      const isLegacyPageNumber = element.role === "caption" && element.x >= 11.5 && element.y >= 6.5 && /^\d{2}$/.test(element.text);
+      if (element.role === "pageNumber" || isLegacyPageNumber) {
         element.text = String(index + 1).padStart(2, "0");
       }
     }
@@ -98,12 +101,16 @@ export function applyOperations(current: Deck, rawOperations: unknown): Deck {
       }
       case "updateStyle": {
         const element = getElement(deck, op.slideId, op.elementId);
+        if (op.rotation !== undefined) element.rotation = op.rotation;
         if (element.kind === "text") {
           if (op.fontSize !== undefined) element.fontSize = op.fontSize;
           if (op.color !== undefined) element.color = op.color;
           if (op.bold !== undefined) element.bold = op.bold;
         } else if (element.kind === "shape") {
           if (op.fill !== undefined) element.fill = op.fill;
+          if (op.stroke !== undefined) element.stroke = op.stroke;
+        } else if (element.kind === "icon") {
+          if (op.color !== undefined) element.color = op.color;
         } else {
           throw new DocumentError("この要素のスタイルは変更できません。");
         }
@@ -130,14 +137,57 @@ export function applyOperations(current: Deck, rawOperations: unknown): Deck {
           for (const element of slide.elements) {
             if (element.kind === "text" && element.color === previous.text) element.color = deck.theme.text;
             if (element.kind === "shape" && element.fill === previous.primary) element.fill = deck.theme.primary;
+            if (element.kind === "icon" && element.color === previous.primary) element.color = deck.theme.primary;
           }
         }
         break;
       }
       case "addImage":
         getSlide(deck, op.slideId).elements.push({ kind: "image", id: crypto.randomUUID(), assetId: op.assetId,
-          x: op.x, y: op.y, w: op.w, h: op.h, alt: op.alt });
+          x: op.x, y: op.y, w: op.w, h: op.h, alt: op.alt, objectFit: op.objectFit ?? "contain",
+          borderRadius: op.borderRadius, stroke: op.stroke, rotation: 0 });
         break;
+      case "addShape":
+        getSlide(deck, op.slideId).elements.push({ kind: "shape", id: crypto.randomUUID(), shape: op.shape,
+          x: op.x, y: op.y, w: op.w, h: op.h, fill: op.fill, stroke: op.stroke, arrowHead: op.arrowHead, rotation: op.rotation ?? 0 });
+        break;
+      case "addIcon":
+        getSlide(deck, op.slideId).elements.push({ kind: "icon", id: crypto.randomUUID(), name: op.name,
+          x: op.x, y: op.y, w: op.w, h: op.h, color: op.color ?? deck.theme.primary, rotation: op.rotation ?? 0 });
+        break;
+      case "deleteElement": {
+        const slide = getSlide(deck, op.slideId);
+        const index = slide.elements.findIndex((e) => e.id === op.elementId);
+        if (index < 0) throw new DocumentError("削除する要素が見つかりません。");
+        slide.elements.splice(index, 1);
+        break;
+      }
+      case "reorderElement": {
+        const slide = getSlide(deck, op.slideId);
+        const index = slide.elements.findIndex((e) => e.id === op.elementId);
+        if (index < 0) throw new DocumentError("移動する要素が見つかりません。");
+        const [element] = slide.elements.splice(index, 1);
+        if (op.action === "bringToFront") {
+          slide.elements.push(element);
+        } else if (op.action === "sendToBack") {
+          slide.elements.unshift(element);
+        } else if (op.action === "bringForward") {
+          const nextIndex = Math.min(index + 1, slide.elements.length);
+          slide.elements.splice(nextIndex, 0, element);
+        } else if (op.action === "sendBackward") {
+          const prevIndex = Math.max(index - 1, 0);
+          slide.elements.splice(prevIndex, 0, element);
+        }
+        break;
+      }
+      case "updateImageProps": {
+        const element = getElement(deck, op.slideId, op.elementId);
+        if (element.kind !== "image") throw new DocumentError("画像を選択してください。");
+        if (op.objectFit !== undefined) element.objectFit = op.objectFit;
+        if (op.borderRadius !== undefined) element.borderRadius = op.borderRadius;
+        if (op.stroke !== undefined) element.stroke = op.stroke ?? undefined;
+        break;
+      }
     }
   }
   refreshPageNumbers(deck);
@@ -147,16 +197,24 @@ export function applyOperations(current: Deck, rawOperations: unknown): Deck {
 }
 
 export function isSmallAIEdit(operations: Operation[]): boolean {
-  return operations.length === 1 && ["updateText", "moveElement", "resizeElement", "updateStyle"].includes(operations[0].type);
+  return operations.length === 1 && [
+    "updateText", "moveElement", "resizeElement", "updateStyle", "updateImageProps", "reorderElement",
+  ].includes(operations[0].type);
 }
 
-export function summarizeOperations(operations: Operation[]): string {
-  if (operations.some((op) => op.type === "replaceDeck")) return "プレゼンテーション全体を作成・再構成";
+export function operationSummaries(operations: Operation[]): string[] {
+  if (operations.some((op) => op.type === "replaceDeck")) return ["プレゼンテーション全体を作成・再構成"];
   const labels: Record<Operation["type"], string> = {
     replaceDeck: "全体を再構成", addSlide: "スライドを追加", deleteSlide: "スライドを削除",
     reorderSlide: "スライドを並べ替え", updateText: "文章を変更", moveElement: "要素を移動",
     resizeElement: "要素のサイズを変更", updateStyle: "見た目を変更", updateTable: "表を更新",
     updateChart: "グラフを更新", setTheme: "テーマを変更", addImage: "画像を追加",
+    addShape: "図形を追加", addIcon: "アイコンを追加", deleteElement: "要素を削除",
+    reorderElement: "重なり順を変更", updateImageProps: "画像設定を変更",
   };
-  return operations.map((op) => labels[op.type]).join("、");
+  return operations.map((op) => labels[op.type]);
+}
+
+export function summarizeOperations(operations: Operation[]): string {
+  return operationSummaries(operations).join("、");
 }

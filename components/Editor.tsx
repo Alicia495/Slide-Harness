@@ -2,26 +2,38 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { ArrowLeft, Check, ChevronDown, CircleAlert, CircleCheck, Download, Eye, FilePlus2, History, ImagePlus, Layers3, Loader2, MessageSquare, Plus, RotateCcw, RotateCw, Send, Settings2, Sparkles, Trash2, X } from "lucide-react";
-import { slideTitle, type Deck, type Element, type Operation, type Slide } from "@/lib/document";
+import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUp, ArrowUpToLine, Check, ChevronDown, ChevronsRight, Circle, CircleAlert, CircleCheck, Download, Eye, FilePlus2, History, ImagePlus, Layers3, LayoutTemplate, ListChecks, Loader2, MessageSquare, MoveHorizontal, MoveVertical, Plus, RotateCcw, RotateCw, Send, Settings2, Shapes, Smile, Sparkles, Square, Trash2, Triangle, X } from "lucide-react";
+import { slideTitle, type Deck, type Element, type Operation, type ShapeType, type Slide, type Theme } from "@/lib/document";
 import type { ModelProfile } from "@/lib/ai";
 import type { ChatMessage, ProjectRecord, Proposal } from "@/lib/projects";
 import { SlideCanvas } from "./SlideCanvas";
+import { IconPickerModal } from "./IconPickerModal";
+import { Modal } from "./Modal";
 
 type HistoryItem = { version: number; source: string; summary: string; createdAt: string };
 type ProjectPayload = { project: ProjectRecord; history: HistoryItem[]; messages: ChatMessage[]; proposal: Proposal | null };
 type SaveState = "saved" | "saving" | "error";
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { cache: "no-store", ...init });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "通信に失敗しました。");
+  if (!response.ok) throw new ApiError(data.error || "通信に失敗しました。", response.status);
   return data as T;
 }
 const post = <T,>(url: string, body: unknown) => jsonRequest<T>(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 function relativeTime(value: string) {
   return new Date(value).toLocaleString("ja-JP", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function elementColor(el: Element): string | undefined {
+  if (el.kind === "shape") return el.fill;
+  if (el.kind === "text" || el.kind === "icon") return el.color;
+  return undefined;
 }
 
 export function Editor({ projectId }: { projectId: string }) {
@@ -42,6 +54,8 @@ export function Editor({ projectId }: { projectId: string }) {
   const [previewProposal, setPreviewProposal] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
   const [showTheme, setShowTheme] = useState(false);
+  const [showShapes, setShowShapes] = useState(false);
+  const [showIconPicker, setShowIconPicker] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [renderedSlides, setRenderedSlides] = useState<string[]>([]);
@@ -51,10 +65,16 @@ export function Editor({ projectId }: { projectId: string }) {
   const [redoTargets, setRedoTargets] = useState<number[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [chatMode, setChatMode] = useState<"plan" | "build">("build");
+  const [templates, setTemplates] = useState<{ id: string; name: string; theme: Theme }[]>([]);
+  const [showPlan, setShowPlan] = useState(false);
   const chatEnd = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragSlide = useRef<string | null>(null);
   const commitInFlight = useRef(false);
+  const chatAbort = useRef<AbortController | null>(null);
+  const [retryOps, setRetryOps] = useState<Operation[] | null>(null);
+  const [isNarrow, setIsNarrow] = useState(false);
 
   const load = useCallback(async (initial = false) => {
     const data = await jsonRequest<ProjectPayload>(`/api/projects/${projectId}`);
@@ -66,12 +86,32 @@ export function Editor({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   useEffect(() => {
+    const modelStorageKey = `slide-harness:model:${projectId}`;
     Promise.all([
       load(true),
-      jsonRequest<{ models: ModelProfile[] }>("/api/models").then((data) => { setModels(data.models); setModelId((old) => old || data.models[0]?.id || ""); }),
+      jsonRequest<{ models: ModelProfile[] }>("/api/models").then((data) => {
+        setModels(data.models);
+        let stored = "";
+        try { stored = window.localStorage.getItem(modelStorageKey) ?? ""; } catch { stored = ""; }
+        setModelId((old) => old || (data.models.some((model) => model.id === stored) ? stored : "") || data.models[0]?.id || "");
+      }),
     ]).catch((reason) => { setError(reason.message); setLoading(false); });
-  }, [load]);
+    jsonRequest<{ templates: { id: string; name: string; theme: Theme }[] }>("/api/templates")
+      .then((data) => setTemplates(data.templates.map((template) => ({ id: template.id, name: template.name, theme: template.theme }))))
+      .catch(() => undefined);
+  }, [load, projectId]);
+  useEffect(() => {
+    if (!modelId) return;
+    try { window.localStorage.setItem(`slide-harness:model:${projectId}`, modelId); } catch { /* プライベートモード等では無視 */ }
+  }, [modelId, projectId]);
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages, busy]);
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 960px)");
+    const sync = (event: MediaQueryListEvent) => setIsNarrow(event.matches);
+    setIsNarrow(query.matches);
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
 
   const displayDeck: Deck | null = proposal && previewProposal ? proposal.proposedDeck : project?.deck ?? null;
   const selectedSlide: Slide | undefined = displayDeck?.slides.find((s) => s.id === selectedSlideId) ?? displayDeck?.slides[0];
@@ -89,10 +129,18 @@ export function Editor({ projectId }: { projectId: string }) {
     try {
       const result = await post<{ project: ProjectRecord }>(`/api/projects/${projectId}/operations`, { baseVersion: previousVersion, operations });
       setProject(result.project); setUndoTargets((items) => [...items, previousVersion]); setRedoTargets([]);
-      setSaveState("saved"); setNotice("変更を保存しました");
+      setSaveState("saved"); setRetryOps(null);
       const refreshed = await load();
       return refreshed.project;
-    } catch (reason) { setSaveState("error"); setError(reason instanceof Error ? reason.message : "保存に失敗しました。"); }
+    } catch (reason) {
+      setSaveState("error"); setError(reason instanceof Error ? reason.message : "保存に失敗しました。");
+      setRetryOps(operations);
+      if (reason instanceof ApiError && reason.status === 409) {
+        // 競合時は最新状態を再取得し、編集を継続できる状態に戻す。
+        setNotice("他の変更が先に保存されたため、最新の状態を読み込みました。再試行は現在の版に基づいて行われます。");
+        await load().catch(() => undefined);
+      }
+    }
     finally { commitInFlight.current = false; }
   }
 
@@ -102,21 +150,39 @@ export function Editor({ projectId }: { projectId: string }) {
     const message = prompt.trim();
     const previousVersion = project.version;
     setBusy(true); setError(""); setNotice(""); setPrompt("");
+    const controller = new AbortController();
+    chatAbort.current = controller;
     try {
-      const result = await post<{ mode: "applied" | "proposal"; project?: ProjectRecord; proposal?: Proposal; compacted?: boolean }>(`/api/projects/${projectId}/chat`, {
-        baseVersion: previousVersion, prompt: message, modelId,
-        target: currentSlide ? { slideId: currentSlide.id, elementId: selectedElement?.id } : undefined,
+      const result = await jsonRequest<{ mode: "applied" | "proposal" | "plan" | "chat"; project?: ProjectRecord; proposal?: Proposal; compacted?: boolean }>(`/api/projects/${projectId}/chat`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
+        body: JSON.stringify({
+          baseVersion: previousVersion, prompt: message, modelId, mode: chatMode,
+          target: chatMode === "build" && currentSlide ? { slideId: currentSlide.id, elementId: selectedElement?.id } : undefined,
+        }),
       });
       if (result.mode === "applied") {
         setUndoTargets((items) => [...items, previousVersion]); setRedoTargets([]);
         setNotice(result.compacted ? "会話の記憶を整理し、AI の修正を反映しました。" : "AI の修正を反映しました。元に戻すこともできます。");
-      } else { setPreviewProposal(true); setNotice(result.compacted ? "会話の記憶を整理しました。変更案を確認してください。" : "変更案を確認してください。"); }
+      } else if (result.mode === "proposal") { setPreviewProposal(true); setNotice(result.compacted ? "会話の記憶を整理しました。変更案を確認してください。" : "変更案を確認してください。"); }
+      else if (result.mode === "plan") { setChatOpen(true); setNotice("構成案を作成しました。内容を確認して「計画として採用」を押してください。"); }
+      else setNotice("AI が回答しました。");
       await load();
     } catch (reason) {
-      setPrompt(message);
-      setError(reason instanceof Error ? reason.message : "AI 処理に失敗しました。");
-      await load().catch(() => undefined);
-    } finally { setBusy(false); }
+      if (controller.signal.aborted) {
+        // キャンセルは通常のエラーとして扱わない。
+        setPrompt(message);
+        setNotice("AI へのリクエストをキャンセルしました。入力はそのまま残っています。");
+      } else {
+        setPrompt(message);
+        setError(reason instanceof Error ? reason.message : "AI 処理に失敗しました。");
+        if (reason instanceof ApiError && reason.status === 409) setNotice("他の変更が先に保存されたため、最新の状態を読み込みました。");
+        await load().catch(() => undefined);
+      }
+    } finally { setBusy(false); chatAbort.current = null; }
+  }
+
+  function cancelChat() {
+    chatAbort.current?.abort();
   }
 
   async function decide(accept: boolean) {
@@ -128,7 +194,10 @@ export function Editor({ projectId }: { projectId: string }) {
       else setNotice("変更案を破棄しました。");
       setPreviewProposal(false);
       await load();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "変更案を処理できませんでした。"); }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "変更案を処理できませんでした。");
+      if (reason instanceof ApiError && reason.status === 409) await load().catch(() => undefined);
+    }
     finally { setBusy(false); }
   }
 
@@ -143,7 +212,10 @@ export function Editor({ projectId }: { projectId: string }) {
       if (kind === "history") { setUndoTargets((items) => [...items, currentVersion]); setRedoTargets([]); setShowHistory(false); }
       setNotice(`版 ${targetVersion} の内容に復元しました。`);
       await load();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "復元できませんでした。"); }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "復元できませんでした。");
+      if (reason instanceof ApiError && reason.status === 409) await load().catch(() => undefined);
+    }
     finally { setBusy(false); }
   }
 
@@ -185,6 +257,89 @@ export function Editor({ projectId }: { projectId: string }) {
     } catch (reason) { setSaveState("error"); setError(reason instanceof Error ? reason.message : "画像を追加できませんでした。"); }
   }
 
+  function addShape(shape: ShapeType, extra: { arrowHead?: "none" | "start" | "end" | "both" } = {}) {
+    if (!currentSlide || !project || busy || proposal || commitInFlight.current) return;
+    const isLine = shape === "line";
+    const isArrow = shape.includes("Arrow") || shape === "chevron";
+    const w = isLine ? 3.5 : isArrow ? 2.0 : 2.5;
+    const h = isLine ? 0.4 : isArrow ? 0.8 : 2.0;
+    void commit([{
+      type: "addShape",
+      slideId: currentSlide.id,
+      shape,
+      x: 5.4,
+      y: 2.8,
+      w,
+      h,
+      fill: isArrow ? project.deck.theme.accent : project.deck.theme.primary,
+      arrowHead: extra.arrowHead,
+      rotation: 0,
+    }]);
+  }
+
+  function addIcon(name: string) {
+    if (!currentSlide || !project || busy || proposal || commitInFlight.current) return;
+    void commit([{
+      type: "addIcon",
+      slideId: currentSlide.id,
+      name,
+      x: 6.2,
+      y: 3.2,
+      w: 0.9,
+      h: 0.9,
+      color: project.deck.theme.primary,
+      rotation: 0,
+    }]);
+  }
+
+  function reorderSelected(action: "bringToFront" | "sendToBack" | "bringForward" | "sendBackward") {
+    if (!currentSlide || !selectedElement || busy || proposal || commitInFlight.current) return;
+    void commit([{
+      type: "reorderElement",
+      slideId: currentSlide.id,
+      elementId: selectedElement.id,
+      action,
+    }]);
+  }
+
+  function rotateSelected(delta: number) {
+    if (!currentSlide || !selectedElement || !["text", "shape", "icon"].includes(selectedElement.kind) || busy || proposal || commitInFlight.current) return;
+    const rotation = (selectedElement.rotation + delta + 360) % 360;
+    void commit([{ type: "updateStyle", slideId: currentSlide.id, elementId: selectedElement.id, rotation }]);
+  }
+
+  function deleteSelected() {
+    if (!currentSlide || !selectedElement || busy || proposal || commitInFlight.current) return;
+    const id = selectedElement.id;
+    setSelectedElementId(null);
+    void commit([{
+      type: "deleteElement",
+      slideId: currentSlide.id,
+      elementId: id,
+    }]);
+  }
+
+  function updateSelectedColor(color: string) {
+    if (!currentSlide || !selectedElement || busy || proposal || commitInFlight.current) return;
+    if (selectedElement.kind === "text") {
+      void commit([{ type: "updateStyle", slideId: currentSlide.id, elementId: selectedElement.id, color }]);
+    } else if (selectedElement.kind === "shape") {
+      void commit([{ type: "updateStyle", slideId: currentSlide.id, elementId: selectedElement.id, fill: color }]);
+    } else if (selectedElement.kind === "icon") {
+      void commit([{ type: "updateStyle", slideId: currentSlide.id, elementId: selectedElement.id, color }]);
+    }
+  }
+
+  function updateImageProperties(properties: { objectFit?: "contain" | "cover" | "fill"; borderRadius?: number; stroke?: string | null }) {
+    if (!currentSlide || !selectedElement || selectedElement.kind !== "image" || busy || proposal || commitInFlight.current) return;
+    void commit([{
+      type: "updateImageProps",
+      slideId: currentSlide.id,
+      elementId: selectedElement.id,
+      ...properties,
+    }]);
+  }
+
   async function testConnection() {
     if (!modelId) return;
     setNotice("AI への接続を確認しています…");
@@ -194,13 +349,58 @@ export function Editor({ projectId }: { projectId: string }) {
     } catch (reason) { setError(reason instanceof Error ? reason.message : "AI に接続できませんでした。"); }
   }
 
+  async function adoptPlan(plan: string) {
+    if (busy || !project) return;
+    setBusy(true); setError("");
+    try {
+      await post(`/api/projects/${projectId}/plan`, { plan, baseVersion: project.version });
+      setChatMode("build");
+      setNotice("構成計画を資料に保存しました。作成モードでの生成にこの構成が使われます。");
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "構成計画を保存できませんでした。");
+      if (reason instanceof ApiError && reason.status === 409) {
+        setNotice("他の変更が先に保存されたため、最新の状態を読み込みました。再度操作してください。");
+        await load().catch(() => undefined);
+      }
+    }
+    finally { setBusy(false); }
+  }
+
+  async function clearPlan() {
+    if (busy || !project) return;
+    setBusy(true); setError("");
+    try {
+      await post(`/api/projects/${projectId}/plan`, { plan: null, baseVersion: project.version });
+      setNotice("構成計画を解除しました。");
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "構成計画を解除できませんでした。");
+      if (reason instanceof ApiError && reason.status === 409) {
+        setNotice("他の変更が先に保存されたため、最新の状態を読み込みました。再度操作してください。");
+        await load().catch(() => undefined);
+      }
+    }
+    finally { setBusy(false); }
+  }
+
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       const target = event.target as HTMLElement;
-      if (target.closest("input, textarea, [contenteditable=true]")) return;
+      // 入力欄・セレクト・ボタン等の操作コントロールで発生したキーは無視する(Backspace/Delete の誤削除防止)。
+      if (target.closest('input, textarea, select, button, a[href], [role="button"], [contenteditable=true]')) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); if (event.shiftKey) { const target = redoTargets.at(-1); if (target !== undefined) void restore(target, "redo"); } else { const target = undoTargets.at(-1); if (target !== undefined) void restore(target, "undo"); } }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); const target = redoTargets.at(-1); if (target !== undefined) void restore(target, "redo"); }
-      if (event.key === "Escape") setSelectedElementId(null);
+      if (event.key === "Escape") {
+        if (document.querySelector(".modal-backdrop")) return;
+        if (sidebarOpen || chatOpen) { setSidebarOpen(false); setChatOpen(false); return; }
+        setSelectedElementId(null);
+      }
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedElementId) {
+        if (document.querySelector(".modal-backdrop")) return;
+        event.preventDefault();
+        deleteSelected();
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -224,15 +424,15 @@ export function Editor({ projectId }: { projectId: string }) {
         <button className="icon-button" title="版の履歴" onClick={() => setShowHistory(true)}><History size={18}/></button>
       </div>
       <div className="header-right">
-        <button className="icon-button responsive-toggle" title="スライド一覧" onClick={() => setSidebarOpen(!sidebarOpen)}><Layers3 size={18}/></button>
-        <button className="icon-button responsive-toggle" title="AI チャット" onClick={() => setChatOpen(!chatOpen)}><MessageSquare size={18}/></button>
-        <button className="button button-primary export-button" onClick={download} disabled={exporting || saveState === "saving" || !project.deck.slides.length}>{exporting ? <Loader2 className="spin" size={17}/> : <Download size={17}/>} <span>{exporting ? "出力中" : "PPTX 出力"}</span></button>
+        <button className="icon-button responsive-toggle" title="スライド一覧" aria-label="スライド一覧" aria-expanded={sidebarOpen} aria-controls="slide-sidebar" onClick={() => { setChatOpen(false); setSidebarOpen(!sidebarOpen); }}><Layers3 size={18}/></button>
+        <button className="icon-button responsive-toggle" title="AI チャット" aria-label="AI チャット" aria-expanded={chatOpen} aria-controls="chat-panel" onClick={() => { setSidebarOpen(false); setChatOpen(!chatOpen); }}><MessageSquare size={18}/></button>
+        <button className="button button-primary export-button" aria-label="PPTX 出力" onClick={download} disabled={exporting || saveState === "saving" || !project.deck.slides.length}>{exporting ? <Loader2 className="spin" size={17}/> : <Download size={17}/>} <span>{exporting ? "出力中" : "PPTX 出力"}</span></button>
       </div>
     </header>
 
     <div className="editor-body">
-      <aside className={`slide-sidebar ${sidebarOpen ? "mobile-open" : ""}`}>
-        <div className="panel-heading"><span>スライド</span><button className="icon-button compact" title="スライドを追加" disabled={!!proposal || busy || saveState === "saving"} onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] } }])}><Plus size={17}/></button></div>
+      <aside id="slide-sidebar" className={`slide-sidebar ${sidebarOpen ? "mobile-open" : ""}`} inert={isNarrow && !sidebarOpen}>
+        <div className="panel-heading"><span>スライド</span><button className="icon-button compact" title="スライドを追加" aria-label="スライドを追加" disabled={!!proposal || busy || saveState === "saving"} onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] } }])}><Plus size={17}/></button></div>
         <div className="slide-list">
           {displayDeck?.slides.map((slide, index) => <button key={slide.id} draggable={!proposal && !busy && saveState !== "saving"} onDragStart={() => { dragSlide.current = slide.id; }} onDragOver={(event) => event.preventDefault()}
             onDrop={() => { const source = dragSlide.current; dragSlide.current = null; if (source && source !== slide.id && !proposal) void commit([{ type: "reorderSlide", slideId: source, toIndex: index }]); }}
@@ -243,23 +443,99 @@ export function Editor({ projectId }: { projectId: string }) {
           </button>)}
           {!displayDeck?.slides.length && <div className="slide-list-empty">チャットから最初のスライドを作成しましょう。</div>}
         </div>
-        <div className="sidebar-bottom"><button className="text-button" onClick={() => setShowTheme(!showTheme)}>テーマ <ChevronDown size={14}/></button>{showTheme && <div className="theme-menu">
-          {[{ label: "クリーン", primary: "#3156D3", accent: "#65A9F0" }, { label: "フォレスト", primary: "#176B5B", accent: "#7CBF9F" }, { label: "チャコール", primary: "#29344B", accent: "#C28A52" }].map((theme) => <button key={theme.label} disabled={!!proposal || busy || saveState === "saving"} onClick={() => { void commit([{ type: "setTheme", primary: theme.primary, accent: theme.accent }]); setShowTheme(false); }}><i style={{ background: theme.primary }}/>{theme.label}</button>)}
+        <div className="sidebar-bottom"><button className="text-button" aria-expanded={showTheme} aria-controls="theme-menu" onClick={() => setShowTheme(!showTheme)}>テーマ <ChevronDown size={14}/></button>{showTheme && <div id="theme-menu" className="theme-menu">
+          {[{ label: "クリーン", theme: { name: "クリーン", primary: "#3156D3", accent: "#65A9F0", background: "#FFFFFF", text: "#182230", fontFace: "Aptos" } }, { label: "フォレスト", theme: { name: "フォレスト", primary: "#176B5B", accent: "#7CBF9F", background: "#FFFFFF", text: "#16352C", fontFace: "Aptos" } }, { label: "チャコール", theme: { name: "チャコール", primary: "#29344B", accent: "#C28A52", background: "#F7F5F0", text: "#182230", fontFace: "Aptos" } }].map((preset) => <button key={preset.label} disabled={!!proposal || busy || saveState === "saving"} onClick={() => { void commit([{ type: "setTheme", ...preset.theme }]); setShowTheme(false); }}><i style={{ background: preset.theme.primary }}/><i style={{ background: preset.theme.accent }}/>{preset.label}</button>)}
+          {!!templates.length && <div className="theme-menu-divider">登録テンプレート</div>}
+          {templates.map((template) => <button key={template.id} disabled={!!proposal || busy || saveState === "saving"} title={`${template.theme.fontFace} · ${template.theme.primary}`} onClick={() => { void commit([{ type: "setTheme", primary: template.theme.primary, accent: template.theme.accent, background: template.theme.background, text: template.theme.text, fontFace: template.theme.fontFace }]); setShowTheme(false); }}><i style={{ background: template.theme.primary }}/><i style={{ background: template.theme.accent }}/>{template.name}</button>)}
         </div>}</div>
       </aside>
 
       <main className="canvas-area">
         <div className="canvas-toolbar">
-          <div className="canvas-breadcrumb"><span>{selectedSlide ? `スライド ${selectedIndex + 1}` : "キャンバス"}</span>{selectedElement && <><span className="crumb-separator">/</span><strong>{selectedElement.kind === "text" ? selectedElement.role : selectedElement.kind}</strong></>}</div>
+          <div className="canvas-breadcrumb">
+            <span>{selectedSlide ? `スライド ${selectedIndex + 1}` : "キャンバス"}</span>
+            {selectedElement && (
+              <>
+                <span className="crumb-separator">/</span>
+                <strong>{selectedElement.kind === "text" ? selectedElement.role : selectedElement.kind}</strong>
+                <div className="element-actions-bar">
+                   <button className="icon-button compact" title="最前面へ移動" onClick={() => reorderSelected("bringToFront")}><ArrowUpToLine size={14}/></button>
+                   <button className="icon-button compact" title="1つ前面へ移動" onClick={() => reorderSelected("bringForward")}><ArrowUp size={14}/></button>
+                   <button className="icon-button compact" title="1つ背面へ移動" onClick={() => reorderSelected("sendBackward")}><ArrowDown size={14}/></button>
+                   <button className="icon-button compact" title="最背面へ移動" onClick={() => reorderSelected("sendToBack")}><ArrowDownToLine size={14}/></button>
+                   {["text", "shape", "icon"].includes(selectedElement.kind) && <>
+                     <button className="icon-button compact" title="左へ15度回転" onClick={() => rotateSelected(-15)}><RotateCcw size={14}/></button>
+                     <button className="icon-button compact" title="右へ15度回転" onClick={() => rotateSelected(15)}><RotateCw size={14}/></button>
+                   </>}
+                    {selectedElement.kind === "image" && (
+                      <div className="image-actions-bar">
+                        <select aria-label="画像の配置" value={selectedElement.objectFit} onChange={(event) => updateImageProperties({ objectFit: event.target.value as "contain" | "cover" | "fill" })}>
+                          <option value="contain">全体表示</option><option value="cover">枠を埋める</option><option value="fill">引き伸ばす</option>
+                        </select>
+                        <button className="toolbar-button" onClick={() => updateImageProperties({ borderRadius: selectedElement.borderRadius ? 0 : 0.2 })} title="画像の角丸を切り替え" aria-label="画像の角丸を切り替え">{selectedElement.borderRadius ? "角丸なし" : "角丸"}</button>
+                        {[null, project.deck.theme.primary, project.deck.theme.accent, "#182230"].map((stroke) => <button key={stroke ?? "none"} type="button" className="image-stroke-button" onClick={() => updateImageProperties({ stroke })} aria-label={stroke ? `枠線 ${stroke}` : "枠線なし"} aria-pressed={selectedElement.stroke === stroke} title={stroke ? `枠線 ${stroke}` : "枠線なし"} style={{ borderColor: stroke ?? "transparent" }}>{stroke ? "" : "×"}</button>)}
+                      </div>
+                    )}
+                   {["shape", "icon", "text"].includes(selectedElement.kind) && (
+                     <div style={{ display: "flex", gap: "3px", alignItems: "center", marginLeft: "4px" }}>
+                       {[project.deck.theme.primary, project.deck.theme.accent, "#182230", "#667085", "#D24646"].map((c) => (
+                         <button
+                           key={c}
+                           type="button"
+                           onClick={() => updateSelectedColor(c)}
+                           aria-label={`色を変更 (${c})`}
+                           aria-pressed={elementColor(selectedElement) === c}
+                           style={{ width: "24px", height: "24px", borderRadius: "50%", background: c, border: "1px solid #CBD5E1", padding: 0 }}
+                           title={`色を変更 (${c})`}
+                         />
+                       ))}
+                     </div>
+                   )}
+                  <button className="icon-button compact danger" title="選択中の要素を削除 (Delete)" onClick={deleteSelected} style={{ marginLeft: "4px" }}>
+                    <Trash2 size={13} color="var(--red)" />
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
           <div className="canvas-actions">
             <input ref={fileInput} type="file" accept="image/png,image/jpeg" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.target.value = ""; }}/>
-            <button className="toolbar-button" disabled={!project.deck.slides.length || rendering || saveState === "saving"} onClick={previewOutput}>{rendering ? <Loader2 className="spin" size={16}/> : <Eye size={16}/>}出力プレビュー</button>
-            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} onClick={() => fileInput.current?.click()}><ImagePlus size={16}/>画像</button>
-            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] }, index: (project.deck.slides.findIndex((s) => s.id === currentSlide?.id) + 1) }])}><FilePlus2 size={16}/>追加</button>
-            <button className="toolbar-button danger" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} onClick={() => { if (currentSlide && window.confirm("このスライドを削除しますか？")) void commit([{ type: "deleteSlide", slideId: currentSlide.id }]); }}><Trash2 size={16}/>削除</button>
+            <div className="toolbar-dropdown">
+              <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} aria-expanded={showShapes} aria-haspopup="menu" onClick={() => setShowShapes(!showShapes)}>
+                <Shapes size={16}/>図形 <ChevronDown size={12}/>
+              </button>
+              {showShapes && (
+                <div className="popover-menu" style={{ width: "300px" }}>
+                  <div className="popover-grid">
+                    <button className="popover-grid-btn" onClick={() => { addShape("rect"); setShowShapes(false); }} title="四角形"><Square size={16}/><span>四角</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("roundRect"); setShowShapes(false); }} title="角丸四角形"><Square size={16} style={{ borderRadius: "4px" }}/><span>角丸</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("ellipse"); setShowShapes(false); }} title="円"><Circle size={16}/><span>円</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("line"); setShowShapes(false); }} title="直線"><span aria-hidden="true">―</span><span>直線</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("line", { arrowHead: "end" }); setShowShapes(false); }} title="矢印線"><ArrowRight size={16}/><span>矢印線</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("line", { arrowHead: "both" }); setShowShapes(false); }} title="双方向矢印線"><MoveHorizontal size={16}/><span>双方向線</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("rightArrow"); setShowShapes(false); }} title="右矢印"><ArrowRight size={16}/><span>右矢印</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("leftArrow"); setShowShapes(false); }} title="左矢印"><ArrowLeft size={16}/><span>左矢印</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("upArrow"); setShowShapes(false); }} title="上矢印"><ArrowUp size={16}/><span>上矢印</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("downArrow"); setShowShapes(false); }} title="下矢印"><ArrowDown size={16}/><span>下矢印</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("leftRightArrow"); setShowShapes(false); }} title="左右両矢印"><MoveHorizontal size={16}/><span>左右両矢印</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("upDownArrow"); setShowShapes(false); }} title="上下両矢印"><MoveVertical size={16}/><span>上下両矢印</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("chevron"); setShowShapes(false); }} title="シェブロン"><ChevronsRight size={16}/><span>シェブロン</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("triangle"); setShowShapes(false); }} title="三角形"><Triangle size={16}/><span>三角形</span></button>
+                    <button className="popover-grid-btn" onClick={() => { addShape("callout"); setShowShapes(false); }} title="吹き出し"><MessageSquare size={16}/><span>吹き出し</span></button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} aria-label="アイコンを追加" onClick={() => setShowIconPicker(true)}>
+              <Smile size={16}/>アイコン
+            </button>
+            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} aria-label="画像を追加" onClick={() => fileInput.current?.click()}><ImagePlus size={16}/>画像</button>
+            <button className="toolbar-button" disabled={!project.deck.slides.length || rendering || saveState === "saving"} aria-label="出力プレビュー" onClick={previewOutput}>{rendering ? <Loader2 className="spin" size={16}/> : <Eye size={16}/>}出力プレビュー</button>
+            <button className="toolbar-button" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} aria-label="この後にスライドを追加" onClick={() => void commit([{ type: "addSlide", slide: { layout: "bullets", title: "新しいスライド", bullets: ["ここに内容を追加"] }, index: (project.deck.slides.findIndex((s) => s.id === currentSlide?.id) + 1) }])}><FilePlus2 size={16}/>追加</button>
+            <button className="toolbar-button danger" disabled={!currentSlide || !!proposal || busy || saveState === "saving"} aria-label="このスライドを削除" onClick={() => { if (currentSlide && window.confirm("このスライドを削除しますか？")) void commit([{ type: "deleteSlide", slideId: currentSlide.id }]); }}><Trash2 size={16}/>削除</button>
           </div>
         </div>
-        {proposal && <div className="proposal-bar"><div><Sparkles size={17}/><strong>AI の変更案</strong><span>{proposal.summary}</span></div><div className="segmented"><button className={!previewProposal ? "active" : ""} onClick={() => setPreviewProposal(false)}>現在</button><button className={previewProposal ? "active" : ""} onClick={() => setPreviewProposal(true)}>変更後</button></div></div>}
+        {proposal && <div className="proposal-bar"><div><Sparkles size={17}/><strong>AI の変更案</strong><span>{proposal.summary}</span></div><div className="segmented" role="group" aria-label="表示の切り替え"><button className={!previewProposal ? "active" : ""} aria-pressed={!previewProposal} onClick={() => setPreviewProposal(false)}>現在</button><button className={previewProposal ? "active" : ""} aria-pressed={previewProposal} onClick={() => setPreviewProposal(true)}>変更後</button></div></div>}
         <div className="canvas-stage">
           {selectedSlide ? <div className="canvas-frame"><SlideCanvas slide={selectedSlide} selectedId={proposal ? null : selectedElementId} changedIds={proposal && previewProposal ? changedIds : undefined}
             readOnly={!!proposal || busy || saveState === "saving"} onSelect={(id) => setSelectedElementId(id)} onCommit={(op) => void commit([op])}/></div> :
@@ -269,29 +545,45 @@ export function Editor({ projectId }: { projectId: string }) {
         {proposal && <div className="proposal-footer"><div><strong>変更案を確認</strong><p>{proposal.operations.length} 件の変更が含まれます。適用するまで資料は変わりません。</p></div><div><button className="button button-ghost" disabled={busy} onClick={() => void decide(false)}>破棄</button><button className="button button-primary" disabled={busy} onClick={() => void decide(true)}><Check size={17}/>適用する</button></div></div>}
       </main>
 
-      <aside className={`chat-panel ${chatOpen ? "mobile-open" : ""}`}>
-        <div className="chat-header"><div><span className="chat-icon"><Sparkles size={17}/></span><div><strong>AI アシスタント</strong><small>資料づくりをサポート</small></div></div><button className="icon-button compact responsive-toggle" onClick={() => setChatOpen(false)}><X size={17}/></button></div>
+      <aside id="chat-panel" className={`chat-panel ${chatOpen ? "mobile-open" : ""}`} aria-label="AI アシスタント" inert={isNarrow && !chatOpen}>
+        <div className="chat-header"><div><span className="chat-icon"><Sparkles size={17}/></span><div><strong>AI アシスタント</strong><small>{chatMode === "plan" ? "構成の相談" : "資料づくりをサポート"}</small></div></div><button className="icon-button compact responsive-toggle" aria-label="チャットを閉じる" title="チャットを閉じる" onClick={() => setChatOpen(false)}><X size={17}/></button></div>
+        <div className="chat-mode-row"><div className="segmented chat-mode-segmented" role="group" aria-label="AI のモード"><button className={chatMode === "plan" ? "active" : ""} aria-pressed={chatMode === "plan"} onClick={() => setChatMode("plan")}><ListChecks size={13}/>計画</button><button className={chatMode === "build" ? "active" : ""} aria-pressed={chatMode === "build"} onClick={() => setChatMode("build")}><Sparkles size={13}/>作成</button></div>{project.plan ? <div className="plan-chip"><LayoutTemplate size={13}/><span>計画採用済み</span><button type="button" title="構成計画を表示" aria-label="構成計画を表示" onClick={() => setShowPlan(true)}>表示</button><button type="button" title="構成計画を解除" aria-label="構成計画を解除" onClick={() => void clearPlan()}><X size={13}/></button></div> : null}</div>
         <div className="model-row"><select aria-label="AI モデル" value={modelId} onChange={(event) => setModelId(event.target.value)}>{models.length ? models.map((model) => <option key={model.id} value={model.id}>{model.label}</option>) : <option value="">AI が未設定です</option>}</select><button title="接続を確認" className="icon-button compact" disabled={!modelId || busy} onClick={testConnection}><CircleCheck size={16}/></button><Link href="/settings/ai" title="AI 設定" className="icon-button compact"><Settings2 size={16}/></Link></div>
-        <div className="chat-messages">
+        <div className="chat-messages" role="log" aria-live="polite" aria-label="AI との会話">
           {!messages.length && <div className="chat-welcome"><span className="welcome-sparkle"><Sparkles size={24}/></span><h3>どんな資料を作りますか？</h3><p>目的や対象読者を伝えると、スライドの構成から一緒に考えます。</p><div className="prompt-suggestions">{["営業提案を5枚で作成", "企画の概要を分かりやすく整理", "社内報告のスライドを作成"].map((suggestion) => <button key={suggestion} onClick={() => setPrompt(suggestion)}>{suggestion}<span>↗</span></button>)}</div></div>}
           {messages.map((message) => <div key={message.id} className={`chat-message ${message.role === "user" ? "from-user" : "from-assistant"}`}>
-            {message.role === "assistant" && <span className="message-avatar"><Sparkles size={13}/></span>}
-            <div className="message-body"><div className="message-text">{message.content}</div>{message.role === "assistant" && message.metadata.mode === "applied" && <div className="message-action"><CircleCheck size={14}/>変更を反映しました</div>}{message.role === "assistant" && message.metadata.mode === "proposal" && <div className="message-action"><Sparkles size={14}/>変更案を作成しました</div>}</div>
+            {message.role === "assistant" && <span className="message-avatar">{message.metadata.mode === "plan" ? <ListChecks size={13}/> : <Sparkles size={13}/>}</span>}
+            <div className="message-body"><div className="message-text">{message.content}</div>{typeof message.metadata.plan === "string" && <pre className="plan-block">{message.metadata.plan}</pre>}{message.role === "assistant" && message.metadata.mode === "plan" && typeof message.metadata.plan === "string" && <button className="plan-adopt" disabled={busy} onClick={() => void adoptPlan(String(message.metadata.plan))}><Check size={14}/>この構成を計画として採用</button>}{message.role === "assistant" && message.metadata.mode === "applied" && <div className="message-action"><CircleCheck size={14}/>変更を反映しました{typeof message.metadata.previousVersion === "number" && <button className="undo-inline" disabled={busy || !!proposal || project.version === Number(message.metadata.previousVersion)} onClick={() => void restore(Number(message.metadata.previousVersion), "history")}>元に戻す</button>}</div>}{message.role === "assistant" && Array.isArray(message.metadata.summaries) && <ul className="op-summary">{(message.metadata.summaries as string[]).map((summary, index) => <li key={index}>{summary}</li>)}</ul>}{message.role === "assistant" && message.metadata.mode === "proposal" && <div className="message-action"><Sparkles size={14}/>変更案を作成しました</div>}{message.role === "assistant" && message.metadata.mode === "chat" && <div className="message-action"><MessageSquare size={14}/>会話の回答</div>}</div>
           </div>)}
-          {busy && <div className="chat-message from-assistant"><span className="message-avatar"><Sparkles size={13}/></span><div className="message-body ai-thinking"><Loader2 className="spin" size={16}/>考えています…</div></div>}
+          {busy && <div className="chat-message from-assistant" role="status"><span className="message-avatar"><Sparkles size={13}/></span><div className="message-body ai-thinking"><Loader2 className="spin" size={16}/>考えています…</div></div>}
           <div ref={chatEnd}/>
         </div>
         <form className="chat-composer" onSubmit={sendChat}>
-          {currentSlide && <div className="target-chip"><span>対象</span><strong>{targetLabel}</strong>{selectedElementId && <button type="button" title="要素選択を解除" onClick={() => setSelectedElementId(null)}><X size={13}/></button>}</div>}
-          <div className="composer-box"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={project.deck.slides.length ? "このスライドをどう編集しますか？" : "作りたい資料を入力してください…"} rows={3}
-            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }}/><div className="composer-footer"><span>Enter で送信 · Shift+Enter で改行</span><button className="send-button" type="submit" title="送信" disabled={!modelId || !prompt.trim() || busy || !!proposal || saveState === "saving"}><Send size={17}/></button></div></div>
+          {currentSlide && <div className="target-chip"><span>対象</span><strong>{targetLabel}</strong>{selectedElementId && <button type="button" title="要素選択を解除" aria-label="要素選択を解除" onClick={() => setSelectedElementId(null)}><X size={13}/></button>}</div>}
+          <div className="composer-box"><textarea aria-label="AI への指示" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={chatMode === "plan" ? "目的・読者・伝えたいことを伝えると、構成案を一緒に考えます…" : (project.deck.slides.length ? "このスライドをどう編集しますか？" : "作りたい資料を入力してください…")} rows={3}
+            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }}/><div className="composer-footer"><span>Enter で送信 · Shift+Enter で改行</span><span className="composer-buttons">{busy ? <button className="cancel-button" type="button" aria-label="AI へのリクエストをキャンセル" onClick={cancelChat}>キャンセル</button> : null}<button className="send-button" type="submit" title="送信" aria-label="送信" disabled={!modelId || !prompt.trim() || busy || !!proposal || saveState === "saving"}><Send size={17}/></button></span></div></div>
           {!models.length && <div className="model-notice">AI が未登録です。AI 設定からモデルを追加してください。</div>}
           {proposal && <div className="model-notice">変更案を適用または破棄してから、次の指示を送れます。</div>}
         </form>
       </aside>
     </div>
-    {(error || notice) && <div className={`toast ${error ? "toast-error" : ""}`} role={error ? "alert" : "status"}>{error ? <CircleAlert size={16}/> : <CircleCheck size={16}/>}<span>{error || notice}</span><button onClick={() => { setError(""); setNotice(""); }} title="閉じる"><X size={15}/></button></div>}
-    {showHistory && <div className="modal-backdrop" onMouseDown={() => setShowHistory(false)}><section className="history-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><History size={20}/><h2>版の履歴</h2></div><button className="icon-button" onClick={() => setShowHistory(false)}><X size={18}/></button></header><p>以前の内容を新しい版として復元できます。</p><div className="history-list">{history.map((item) => <div key={item.version} className="history-item"><span className="history-version">v{item.version}</span><div><strong>{item.summary}</strong><small>{relativeTime(item.createdAt)} · {item.source === "ai" ? "AI" : item.source === "manual" ? "手動" : item.source === "restore" ? "復元" : "作成"}</small></div><button className="button button-ghost" disabled={item.version === project.version || busy || !!proposal} onClick={() => void restore(item.version, "history")}>復元</button></div>)}</div></section></div>}
-    {showOutputPreview && <div className="modal-backdrop" onMouseDown={() => setShowOutputPreview(false)}><section className="output-modal" onMouseDown={(event) => event.stopPropagation()}><header><div><Eye size={20}/><h2>PowerPoint 出力プレビュー</h2></div><button className="icon-button" onClick={() => setShowOutputPreview(false)}><X size={18}/></button></header><div className="output-image-wrap">{renderedSlides[renderPage] && <img src={renderedSlides[renderPage]} alt={`出力スライド ${renderPage + 1}`}/>}</div><footer><span>{renderPage + 1} / {renderedSlides.length}</span><div><button className="button button-ghost" disabled={renderPage === 0} onClick={() => setRenderPage((n) => n - 1)}>前へ</button><button className="button button-ghost" disabled={renderPage >= renderedSlides.length - 1} onClick={() => setRenderPage((n) => n + 1)}>次へ</button></div></footer></section></div>}
+    {(sidebarOpen || chatOpen) && <div className="drawer-backdrop responsive-toggle" aria-hidden="true" onClick={() => { setSidebarOpen(false); setChatOpen(false); }}/>}
+    {(error || notice) && <div className={`toast ${error ? "toast-error" : ""}`} role={error ? "alert" : "status"}>{error ? <CircleAlert size={16}/> : <CircleCheck size={16}/>}<span>{error || notice}</span>{error && saveState === "error" && retryOps && <button className="toast-retry" onClick={() => { const ops = retryOps; setRetryOps(null); setError(""); void commit(ops); }}>再試行</button>}<button aria-label="閉じる" title="閉じる" onClick={() => { setError(""); setNotice(""); setRetryOps(null); }}><X size={15}/></button></div>}
+    {showHistory && <Modal isOpen={showHistory} onClose={() => setShowHistory(false)} labelledBy="history-title" className="history-modal">
+      <header><div><History size={20}/><h2 id="history-title">版の履歴</h2></div><button className="icon-button" aria-label="閉じる" onClick={() => setShowHistory(false)}><X size={18}/></button></header>
+      <p>以前の内容を新しい版として復元できます。</p>
+      <div className="history-list">{history.map((item) => <div key={item.version} className="history-item"><span className="history-version">v{item.version}</span><div><strong>{item.summary}</strong><small>{relativeTime(item.createdAt)} · {item.source === "ai" ? "AI" : item.source === "manual" ? "手動" : item.source === "restore" ? "復元" : "作成"}</small></div><button className="button button-ghost" disabled={item.version === project.version || busy || !!proposal} onClick={() => void restore(item.version, "history")}>復元</button></div>)}</div>
+    </Modal>}
+    {showOutputPreview && <Modal isOpen={showOutputPreview} onClose={() => setShowOutputPreview(false)} labelledBy="output-title" className="output-modal">
+      <header><div><Eye size={20}/><h2 id="output-title">PowerPoint 出力プレビュー</h2></div><button className="icon-button" aria-label="閉じる" onClick={() => setShowOutputPreview(false)}><X size={18}/></button></header>
+      <div className="output-image-wrap">{renderedSlides[renderPage] && <img src={renderedSlides[renderPage]} alt={`出力スライド ${renderPage + 1}`}/>}</div>
+      <footer><span>{renderPage + 1} / {renderedSlides.length}</span><div><button className="button button-ghost" disabled={renderPage === 0} onClick={() => setRenderPage((n) => n - 1)}>前へ</button><button className="button button-ghost" disabled={renderPage >= renderedSlides.length - 1} onClick={() => setRenderPage((n) => n + 1)}>次へ</button></div></footer>
+    </Modal>}
+    <IconPickerModal isOpen={showIconPicker} onClose={() => setShowIconPicker(false)} onSelect={addIcon} />
+    {showPlan && project.plan && <Modal isOpen={showPlan} onClose={() => setShowPlan(false)} labelledBy="plan-title" className="plan-modal">
+      <header><div><LayoutTemplate size={20}/><h2 id="plan-title">採用済みの構成計画</h2></div><button className="icon-button" aria-label="閉じる" onClick={() => setShowPlan(false)}><X size={18}/></button></header>
+      <pre className="plan-block plan-modal-body">{project.plan}</pre>
+      <footer><button className="button button-ghost" disabled={busy} onClick={() => { setShowPlan(false); void clearPlan(); }}>計画を解除</button><button className="button button-primary" onClick={() => { setShowPlan(false); setChatMode("build"); setChatOpen(true); }}>この構成で作成へ</button></footer>
+    </Modal>}
   </div>;
 }

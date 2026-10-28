@@ -31,6 +31,25 @@ export async function renderSlides(projectId: string, version: number, pptxBytes
   }
 }
 
+export async function renderPptxPreview(pptxBytes: Buffer): Promise<Buffer[]> {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "slide-harness-vision-"));
+  try {
+    const source = path.join(tempDir, "deck.pptx");
+    await writeFile(source, pptxBytes);
+    const profile = pathToFileURL(path.join(tempDir, "lo-profile")).href;
+    await execFileAsync("libreoffice", [
+      `-env:UserInstallation=${profile}`, "--headless", "--convert-to", "pdf", "--outdir", tempDir, source,
+    ], { timeout: 60000, windowsHide: true });
+    const pdf = path.join(tempDir, "deck.pdf");
+    await execFileAsync("pdftoppm", ["-png", "-r", "96", pdf, path.join(tempDir, "slide")], { timeout: 60000, windowsHide: true });
+    const names = (await readdir(tempDir)).filter((name) => /^slide-\d+\.png$/.test(name)).sort((a, b) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]));
+    if (!names.length) throw new Error("視覚レビュー用プレビューを生成できませんでした。");
+    return Promise.all(names.map((name) => readFile(path.join(tempDir, name))));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 export async function readRenderedSlide(projectId: string, version: number, name: string): Promise<Buffer> {
   return readFile(path.join(DATA_DIR, "renders", projectId, String(version), name));
 }
